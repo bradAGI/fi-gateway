@@ -140,10 +140,9 @@ def _run_discovery(kind: str, refresh: bool = False) -> list[dict]:
     return handler(refresh=refresh)
 
 
-# Name patterns that are NEVER chat-completion endpoints across providers.
-# Apply at discovery time to all upstreams so the catalog stays clean and
-# the probe doesn't waste time on guaranteed 400s.
-_NON_CHAT_NAME_FRAGMENTS = (
+# Drop entirely — entirely different endpoint shapes that the gateway can't
+# proxy through /v1/chat/completions OR /v1/embeddings.
+_DROP_NAME_FRAGMENTS = (
     # Image generation
     "/imagen", "imagen-", "/dalle", "dall-e", "stable-diffusion", "/flux",
     "/seedream", "/seedance", "nano-banana",
@@ -152,33 +151,49 @@ _NON_CHAT_NAME_FRAGMENTS = (
     # Audio / TTS / STT
     "whisper", "/tts", "-tts-", "speech-to-text", "text-to-speech",
     "voxtral", "audio-model",
-    # Embeddings (have own endpoint)
-    "/embed-", "-embed-v", "embedding-", "/embeddings/",
-    "embed-multilingual", "bge-",
-    "embedqa", "embedcode", "nv-embed", "-embedqa", "-embedcode",
-    # Rerankers (have own endpoint)
-    "rerank-", "-rerank", "/rerank/",
-    # Document parsers / specialty (use different request shapes)
+    # Document parsers (use different request shapes)
     "nemoretriever", "/nemotron-parse", "-parse-",
-    # Deprecated / known-broken
+    # Deprecated
     "/vila",
 )
 
+# Embedding models — keep in catalog, tag as `embed`, probe via /v1/embeddings.
+_EMBED_NAME_FRAGMENTS = (
+    "/embed-", "-embed-v", "embedding-", "/embeddings/", "/embedding-",
+    "embed-multilingual", "bge-",
+    "embedqa", "embedcode", "nv-embed", "-embedqa", "-embedcode",
+    "-embedding", "/embedding",
+)
 
-def _is_chat_capable(name: str) -> bool:
-    """Reject names that match any known non-chat fragment. Conservative —
-    when in doubt, include and let probe catch it."""
+# Reranker models — keep in catalog, tag as `rerank`. No standard probe path
+# (each provider's rerank API has a different request shape) so probe skips
+# them; users wire up reranking explicitly.
+_RERANK_NAME_FRAGMENTS = (
+    "rerank-", "-rerank", "/rerank/",
+)
+
+
+def _classify_alias(name: str) -> str:
+    """Classify an upstream model id into 'chat' (default), 'embed',
+    'rerank', or 'drop'. Used at discovery time to either exclude a model
+    or attach the right tag so probe knows which endpoint to hit."""
     n = name.lower()
-    return not any(frag in n for frag in _NON_CHAT_NAME_FRAGMENTS)
+    if any(f in n for f in _DROP_NAME_FRAGMENTS):
+        return "drop"
+    if any(f in n for f in _EMBED_NAME_FRAGMENTS):
+        return "embed"
+    if any(f in n for f in _RERANK_NAME_FRAGMENTS):
+        return "rerank"
+    return "chat"
 
 
-# Model-id patterns that are NOT text-generation on Google AI Studio.
-# These endpoints use /v1/images, /v1/embeddings, /v1/audio etc., so they
-# 400 or 404 if probed via /v1/chat/completions.
-_GEMINI_NON_CHAT_PATTERNS = (
+# Gemini-specific patterns that aren't even text-generation OR embedding —
+# they're entirely separate AI Studio capabilities (image/video/audio/etc.)
+# that the gateway can't proxy through chat or /v1/embeddings.
+_GEMINI_DROP_PATTERNS = (
     "-image", "-tts", "-audio", "-live-", "-video", "-robotics",
     "imagen", "veo", "lyria", "nano-banana", "computer-use",
-    "embedding", "aqa", "deep-research",
+    "aqa", "deep-research",
 )
 
 
@@ -210,12 +225,20 @@ def _fetch_gemini_models(refresh: bool = False) -> list[dict]:
         if not mid:
             continue
         lower = mid.lower()
-        if any(pat in lower for pat in _GEMINI_NON_CHAT_PATTERNS):
+        if any(pat in lower for pat in _GEMINI_DROP_PATTERNS):
             continue
+        cls = _classify_alias(mid)
+        if cls == "drop":
+            continue
+        groups = _infer_gemini_groups(mid)
+        if cls == "embed" and "embed" not in groups:
+            groups.append("embed")
+        if cls == "rerank" and "rerank" not in groups:
+            groups.append("rerank")
         models_out.append({
             "alias": mid,
             "upstream": mid,
-            "groups": _infer_gemini_groups(mid),
+            "groups": groups,
         })
     _save_discovery_cache("gemini", models_out)
     return models_out
@@ -259,12 +282,20 @@ def _fetch_nvidia_models(refresh: bool = False) -> list[dict]:
     out = []
     for m in data.get("data", []):
         mid = m.get("id", "")
-        if not mid or not _is_chat_capable(mid):
+        if not mid:
             continue
+        cls = _classify_alias(mid)
+        if cls == "drop":
+            continue
+        groups = _infer_nvidia_groups(mid)
+        if cls == "embed" and "embed" not in groups:
+            groups.append("embed")
+        if cls == "rerank" and "rerank" not in groups:
+            groups.append("rerank")
         out.append({
             "alias": mid,
             "upstream": mid,
-            "groups": _infer_nvidia_groups(mid),
+            "groups": groups,
         })
     _save_discovery_cache("nvidia_nim", out)
     return out
@@ -423,18 +454,27 @@ def _fetch_openrouter_free_models(refresh: bool = False) -> list[dict]:
         if not _is_free_pricing(pricing):
             continue
         mid = m.get("id") or ""
-        if not _is_chat_capable(mid):
+        if not mid:
             continue
-        # OpenRouter exposes architecture.output_modalities; require text
-        # output (drops image/video/audio generation models cleanly).
+        cls = _classify_alias(mid)
+        if cls == "drop":
+            continue
+        # OpenRouter exposes architecture.output_modalities. For chat models
+        # require text output (drops image/video/audio gen). Embedding
+        # models legitimately have output="embedding" so allow them through.
         arch = m.get("architecture") or {}
         out_modalities = arch.get("output_modalities")
-        if isinstance(out_modalities, list) and out_modalities and "text" not in out_modalities:
+        if cls == "chat" and isinstance(out_modalities, list) and out_modalities and "text" not in out_modalities:
             continue
+        groups = _infer_or_groups(m)
+        if cls == "embed" and "embed" not in groups:
+            groups.append("embed")
+        if cls == "rerank" and "rerank" not in groups:
+            groups.append("rerank")
         free.append({
             "alias": mid,
             "upstream": mid,
-            "groups": _infer_or_groups(m),
+            "groups": groups,
         })
     _save_discovery_cache("openrouter_free", free)
     return free
@@ -1019,6 +1059,44 @@ def _probe_one(master: str, alias: str, timeout: int = 20) -> tuple[str, dict]:
         return alias, {"ok": False, "note": f"{type(e).__name__}: {str(e)[:90]}"}
 
 
+def _probe_one_embed(master: str, alias: str, timeout: int = 20) -> tuple[str, dict]:
+    """Smoke-test an embedding alias via /v1/embeddings."""
+    body = {"model": alias, "input": "test"}
+    req = urllib.request.Request(
+        f"http://localhost:{PORT}/v1/embeddings",
+        data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {master}", "Content-Type": "application/json"},
+    )
+    start = time.monotonic()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read())
+        latency_ms = int((time.monotonic() - start) * 1000)
+        records = data.get("data") or []
+        vec = records[0].get("embedding") if records else None
+        ok_flag = bool(vec) and isinstance(vec, list) and len(vec) > 0
+        return alias, {
+            "ok": ok_flag,
+            "latency_ms": latency_ms,
+            "endpoint": "embed",
+            "dim": len(vec) if ok_flag else None,
+            "note": None if ok_flag else "no embedding vector in response",
+        }
+    except urllib.error.HTTPError as e:
+        body_text = e.read().decode("utf-8", errors="replace")[:140]
+        if e.code == 429:
+            note = f"429 rate-limited: {body_text[:80]}"
+        elif e.code in (401, 403):
+            note = f"{e.code} auth: {body_text[:80]}"
+        elif e.code == 404:
+            note = f"404 not found / unauthorized: {body_text[:80]}"
+        else:
+            note = f"{e.code}: {body_text[:80]}"
+        return alias, {"ok": False, "code": e.code, "endpoint": "embed", "note": note}
+    except Exception as e:
+        return alias, {"ok": False, "endpoint": "embed", "note": f"{type(e).__name__}: {str(e)[:90]}"}
+
+
 def cmd_probe(args) -> int:
     master = load_keys().get("LITELLM_MASTER_KEY")
     if not master:
@@ -1043,7 +1121,9 @@ def cmd_probe(args) -> int:
             return 1
     catalog = load_catalog()
     grouped = grouped_keys()
-    aliases: list[str] = []
+    # (alias, kind) where kind ∈ {"chat","embed"}; rerank is skipped because
+    # each provider's rerank API takes a different shape.
+    targets: list[tuple[str, str]] = []
     seen: set[str] = set()
     for p in catalog:
         if not (grouped.get(p["key_env"]) or p.get("optional_key")):
@@ -1054,26 +1134,23 @@ def cmd_probe(args) -> int:
             if args.provider and args.provider != p["name"]:
                 continue
             alias = m["alias"]
-            # Skip group aliases in probe — they're not direct deployments,
-            # they resolve to one of many. Probe exercises leaves, not groups.
-            if alias in ("fast", "smart", "code", "reasoning", "vision", "embed", "rerank", "free", "default", "cheap"):
-                continue
-            # Embedding and rerank models don't speak /v1/chat/completions;
-            # they have their own endpoints and will always 400/404 if probed
-            # through chat. Skip them.
-            mgroups = set(m.get("groups", []))
-            if mgroups & {"embed", "rerank"}:
-                continue
             if alias in seen:
                 continue
+            mgroups = set(m.get("groups", []))
+            if "rerank" in mgroups:
+                continue  # no standard probe; users wire reranking explicitly
+            kind = "embed" if "embed" in mgroups else "chat"
             seen.add(alias)
-            aliases.append(alias)
+            targets.append((alias, kind))
     if args.limit:
-        aliases = aliases[:args.limit]
-    if not aliases:
+        targets = targets[:args.limit]
+    if not targets:
         err("no aliases to probe (try --group, --provider, or add keys)")
         return 1
-    out(f"Probing {len(aliases)} aliases at http://localhost:{PORT} (concurrency={args.concurrency}, timeout={args.timeout}s)…")
+    n_chat = sum(1 for _, k in targets if k == "chat")
+    n_embed = sum(1 for _, k in targets if k == "embed")
+    out(f"Probing {len(targets)} aliases at http://localhost:{PORT} "
+        f"({n_chat} chat, {n_embed} embed; concurrency={args.concurrency}, timeout={args.timeout}s)…")
     results: dict[str, dict] = {}
     # Preserve existing results for aliases we're not re-probing this run.
     existing = load_probe_cache(ignore_ttl=True) or {}
@@ -1081,7 +1158,10 @@ def cmd_probe(args) -> int:
     done = 0
     okc = failc = 0
     with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
-        futures = {pool.submit(_probe_one, master, a, args.timeout): a for a in aliases}
+        futures = {}
+        for alias, kind in targets:
+            fn = _probe_one_embed if kind == "embed" else _probe_one
+            futures[pool.submit(fn, master, alias, args.timeout)] = alias
         for fut in as_completed(futures):
             alias, result = fut.result()
             results[alias] = result
@@ -1094,7 +1174,7 @@ def cmd_probe(args) -> int:
                 failc += 1
                 mark = f"{C.RD}✗{C.R}"
                 detail = result.get("note", "")
-            print(f"  [{done:>3}/{len(aliases)}] {mark} {alias:<48} {detail}", file=sys.stderr)
+            print(f"  [{done:>3}/{len(targets)}] {mark} {alias:<48} {detail}", file=sys.stderr)
     save_probe_cache(results)
     out("")
     ok(f"{okc} working, {C.RD}{failc} broken{C.R} — results cached 24h at {PROBE_CACHE}")
