@@ -499,7 +499,8 @@ def _yaml_str(s: str) -> str:
         return json.dumps(s)
     return s
 
-def render_config(catalog: list[dict], grouped: dict[str, list[str]]) -> str:
+def render_config(catalog: list[dict], grouped: dict[str, list[str]],
+                  include_broken: bool = False) -> str:
     """Render LiteLLM config.yaml. Hand-written to avoid PyYAML.
 
     Each model_list entry is a concrete (alias, deployment) pair. We do NOT
@@ -510,7 +511,8 @@ def render_config(catalog: list[dict], grouped: dict[str, list[str]]) -> str:
     Aliases that have been probed and failed (per ~/.config/free-inference/
     .probe-cache.json) are automatically excluded — the router never picks
     them, clients never see them in /v1/models. Unprobed aliases pass
-    through. Re-probe to unblock a false positive.
+    through. Pass include_broken=True to emit everything (used by `./fi
+    probe --include-broken` so it can retest previously-failed aliases).
     """
     lines = ["model_list:"]
     probe = load_probe_cache(ignore_ttl=True) or {}
@@ -526,10 +528,12 @@ def render_config(catalog: list[dict], grouped: dict[str, list[str]]) -> str:
         for model in prov.get("model", []):
             alias = model["alias"]
             # Skip aliases known-broken from probe. Unprobed → include.
-            pr = probe.get(alias)
-            if pr is not None and not pr.get("ok"):
-                skipped_broken.append(alias)
-                continue
+            # include_broken=True bypasses the filter (probe retest mode).
+            if not include_broken:
+                pr = probe.get(alias)
+                if pr is not None and not pr.get("ok"):
+                    skipped_broken.append(alias)
+                    continue
             for key_var in effective:
                 lines.append(f"  - model_name: {_yaml_str(alias)}")
                 lines.append("    litellm_params:")
@@ -573,14 +577,13 @@ def render_config(catalog: list[dict], grouped: dict[str, list[str]]) -> str:
     ]
     return "\n".join(lines)
 
-def write_config() -> list[dict]:
+def write_config(include_broken: bool = False) -> list[dict]:
     ensure_master_key()
     catalog = load_catalog()
     grouped = grouped_keys()
     HOME.mkdir(parents=True, exist_ok=True)
-    rendered = render_config(catalog, grouped)
+    rendered = render_config(catalog, grouped, include_broken=include_broken)
     CONFIG_YAML.write_text(rendered)
-    # Surface the "excluded N broken" breadcrumb from the config file header.
     first = rendered.splitlines()[0] if rendered else ""
     if first.startswith("# Excluded "):
         print(f"{C.D}{first[2:]}{C.R}", file=sys.stderr)
@@ -877,6 +880,20 @@ def cmd_probe(args) -> int:
     if not is_alive():
         err("proxy is down — run `./fi start` first")
         return 1
+    # --include-broken: regenerate config with probe-failed aliases re-added
+    # and force-reload the container so we can actually test them. Without
+    # this, previously-broken aliases 400 because they've been filtered out
+    # of model_list by earlier renders.
+    if args.include_broken:
+        out(f"{C.D}re-rendering config with all aliases included (--include-broken)…{C.R}")
+        write_config(include_broken=True)
+        rc = compose("up", "-d", "--force-recreate", "litellm").returncode
+        if rc != 0:
+            err("failed to recreate container")
+            return rc
+        if not wait_alive():
+            err("proxy did not come back up — check `./fi logs`")
+            return 1
     catalog = load_catalog()
     grouped = grouped_keys()
     aliases: list[str] = []
@@ -934,6 +951,8 @@ def cmd_probe(args) -> int:
     save_probe_cache(results)
     out("")
     ok(f"{okc} working, {C.RD}{failc} broken{C.R} — results cached 24h at {PROBE_CACHE}")
+    if args.include_broken:
+        out(f"{C.Y}config currently includes all aliases — run `./fi reload` to re-apply the exclude-broken filter.{C.R}")
     out(f"Filter to working models: {C.B}./fi models --working{C.R}")
     return 0
 
@@ -1233,6 +1252,8 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--limit", "-n", type=int, default=None, help="Probe at most N aliases")
     pp.add_argument("--concurrency", "-c", type=int, default=8, help="Parallel probes (default 8)")
     pp.add_argument("--timeout", "-t", type=int, default=20, help="Per-probe timeout seconds (default 20)")
+    pp.add_argument("--include-broken", action="store_true",
+                    help="Temporarily re-render config without the exclude-broken filter so previously-failed aliases can be retested. Run `./fi reload` after to re-apply the filter.")
     pp.set_defaults(fn=cmd_probe)
 
     pc = sub.add_parser("config", help="Inspect generated config")
