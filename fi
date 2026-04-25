@@ -504,11 +504,17 @@ def render_config(catalog: list[dict], grouped: dict[str, list[str]]) -> str:
 
     Each model_list entry is a concrete (alias, deployment) pair. We do NOT
     emit group names (fast/smart/etc.) as callable model_name entries —
-    those caused opaque routing surprises (random deployment picked, then
-    account-level 404s). Group tags remain as filter metadata on the model
-    via providers.toml; callers must name a specific alias.
+    those caused opaque routing surprises. Group tags remain as filter
+    metadata only; callers must name a specific alias.
+
+    Aliases that have been probed and failed (per ~/.config/free-inference/
+    .probe-cache.json) are automatically excluded — the router never picks
+    them, clients never see them in /v1/models. Unprobed aliases pass
+    through. Re-probe to unblock a false positive.
     """
     lines = ["model_list:"]
+    probe = load_probe_cache(ignore_ttl=True) or {}
+    skipped_broken: list[str] = []
 
     for prov in catalog:
         key_vars = grouped.get(prov["key_env"], [])
@@ -518,8 +524,14 @@ def render_config(catalog: list[dict], grouped: dict[str, list[str]]) -> str:
         effective: list[str | None] = list(key_vars) if key_vars else [None]
 
         for model in prov.get("model", []):
+            alias = model["alias"]
+            # Skip aliases known-broken from probe. Unprobed → include.
+            pr = probe.get(alias)
+            if pr is not None and not pr.get("ok"):
+                skipped_broken.append(alias)
+                continue
             for key_var in effective:
-                lines.append(f"  - model_name: {_yaml_str(model['alias'])}")
+                lines.append(f"  - model_name: {_yaml_str(alias)}")
                 lines.append("    litellm_params:")
                 lines.append(f"      model: {_yaml_str(prov['litellm_prefix'] + '/' + model['upstream'])}")
                 # LiteLLM's openai driver requires an api_key even for keyless
@@ -534,6 +546,11 @@ def render_config(catalog: list[dict], grouped: dict[str, list[str]]) -> str:
                     lines.append(f"      rpm: {model['rpm']}")
                 if model.get("tpm"):
                     lines.append(f"      tpm: {model['tpm']}")
+
+    if skipped_broken:
+        # Leave a breadcrumb in the generated file so users understand the
+        # trim — purely informational since YAML comments are ignored.
+        lines.insert(0, f"# Excluded {len(skipped_broken)} probe-failed aliases; run `./fi probe` to re-check.")
 
     lines += [
         "router_settings:",
@@ -561,7 +578,12 @@ def write_config() -> list[dict]:
     catalog = load_catalog()
     grouped = grouped_keys()
     HOME.mkdir(parents=True, exist_ok=True)
-    CONFIG_YAML.write_text(render_config(catalog, grouped))
+    rendered = render_config(catalog, grouped)
+    CONFIG_YAML.write_text(rendered)
+    # Surface the "excluded N broken" breadcrumb from the config file header.
+    first = rendered.splitlines()[0] if rendered else ""
+    if first.startswith("# Excluded "):
+        print(f"{C.D}{first[2:]}{C.R}", file=sys.stderr)
     return [p for p in catalog if grouped.get(p["key_env"]) or p.get("optional_key")]
 
 
@@ -790,6 +812,17 @@ def cmd_sync(args) -> int:
         ok(f"{prov['name']}: {len(prov.get('model', []))} models cached")
     if not any_dynamic:
         out("No discoverable providers configured.")
+    # Prune probe cache: drop entries for aliases no longer in the catalog.
+    # Upstream catalogs churn (NVIDIA especially); stale probe entries cause
+    # `./fi models --working` to list models the gateway can't actually route.
+    all_aliases = {m["alias"] for p in catalog for m in p.get("model", [])}
+    probe = load_probe_cache(ignore_ttl=True) or {}
+    stale = [a for a in probe if a not in all_aliases]
+    if stale:
+        for a in stale:
+            probe.pop(a, None)
+        save_probe_cache(probe)
+        out(f"{C.D}pruned {len(stale)} stale probe entries (no longer in catalog){C.R}")
     return 0
 
 def _probe_one(master: str, alias: str, timeout: int = 20) -> tuple[str, dict]:
