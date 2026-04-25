@@ -21,26 +21,36 @@
 
 ## Quickstart
 
+**1.** Get the repo. Either install as a skill (Claude Code / opencode / pi / 41 other agents pick it up automatically) or clone directly:
+
 ```bash
-# 1. Install the skill
+# Option A — skill install (recommended for agent users)
 npx skills add bradagi/fi-gateway
 
-# 2. Add free keys (any combination — start with what you have)
+# Option B — direct clone (no Node, no skill registration; just the CLI)
+git clone https://github.com/bradAGI/fi-gateway && cd fi-gateway
+```
+
+**2.** Add free keys, boot the proxy, verify what works:
+
+```bash
 ./fi keys add gemini AIza...
 ./fi keys add nvidia nvapi-...
 ./fi keys add openrouter sk-or-...
 
-# 3. Boot the proxy
 ./fi start                  # prints the master key (sk-fi-…)
-
-# 4. Verify what actually works for your account
 ./fi probe                  # parallel smoke test, caches working/broken
 ./fi reload                 # regenerate config, expose only verified models
+```
 
-# 5. Wire your coding agent (any combination)
+**3.** Wire any coding agent CLIs you have installed:
+
+```bash
 ./fi wire cc                # Claude Code   → ~/.claude/settings.json
 ./fi wire opencode          # opencode      → ~/.config/opencode/opencode.json
 ./fi wire pi                # pi-mono       → ~/.pi/agent/models.json
+./fi wire openclaw          # openclaw      → ~/.openclaw/config.yaml      (via `openclaw onboard`)
+./fi wire hermes            # hermes-agent  → ~/.hermes/config.yaml        (via `hermes config set`)
 ```
 
 That's it — your wired agent now routes through `localhost:4000` using your free keys. Every wired tool gets a clean `/v1/models` list of probe-verified callable aliases.
@@ -109,8 +119,8 @@ Smoke test   ./fi test <alias> [--prompt P]            OpenAI shape
              ./fi test-anthropic <alias> [--prompt P]  Anthropic shape
 Probe        ./fi probe [-g GROUP] [-p PROVIDER] [-c N] [-t SEC] [--include-broken]
 Wiring       ./fi detect                        scan installed agent CLIs
-             ./fi wire cc | opencode | pi       edits config, saves .fi-backup
-             ./fi unwire cc | opencode | pi     restore from backup
+             ./fi wire cc | opencode | pi | openclaw | hermes
+             ./fi unwire cc | opencode | pi | openclaw | hermes
 ```
 
 ## Probe + auto-exclude

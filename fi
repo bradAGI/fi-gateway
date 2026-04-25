@@ -1304,11 +1304,47 @@ def _wire_cc_unpatch(cfg: dict) -> dict:
     return cfg
 
 
+def _wire_openclaw_check_text(cfg_text: str) -> bool:
+    return BASE_URL in cfg_text and FI_PROVIDER_ID in cfg_text
+
+def _wire_openclaw_run(master: str) -> int:
+    """Shell out to openclaw's onboarding CLI to register fi as a custom
+    OpenAI-compatible provider. openclaw owns the YAML format."""
+    return subprocess.run([
+        "openclaw", "onboard",
+        "--auth-choice", "custom-api-key",
+        "--custom-provider-id", FI_PROVIDER_ID,
+        "--custom-base-url", FI_OPENAI_URL,
+        "--custom-api-key", master,
+        "--custom-model-id", FI_WIRE_MODELS[0],
+        "--custom-compatibility", "openai",
+    ]).returncode
+
+
+def _wire_hermes_check_text(cfg_text: str) -> bool:
+    return BASE_URL in cfg_text and "provider: custom" in cfg_text
+
+def _wire_hermes_run(master: str) -> int:
+    """Use hermes config set commands — hermes owns the YAML format."""
+    pairs = [
+        ("model.provider", "custom"),
+        ("model.base_url", FI_OPENAI_URL),
+        ("model.api_key", master),
+        ("model.default", FI_WIRE_MODELS[0]),
+    ]
+    for key, val in pairs:
+        rc = subprocess.run(["hermes", "config", "set", key, val]).returncode
+        if rc != 0:
+            return rc
+    return 0
+
+
 def _wire_targets() -> dict:
     return {
         "pi": {
             "binary": "pi",
             "config": Path.home() / ".pi" / "agent" / "models.json",
+            "kind": "json",
             "check": _wire_pi_check,
             "patch": _wire_pi_patch,
             "unpatch": _wire_pi_unpatch,
@@ -1316,6 +1352,7 @@ def _wire_targets() -> dict:
         "opencode": {
             "binary": "opencode",
             "config": Path.home() / ".config" / "opencode" / "opencode.json",
+            "kind": "json",
             "check": _wire_opencode_check,
             "patch": _wire_opencode_patch,
             "unpatch": _wire_opencode_unpatch,
@@ -1323,11 +1360,36 @@ def _wire_targets() -> dict:
         "cc": {
             "binary": "claude",
             "config": Path.home() / ".claude" / "settings.json",
+            "kind": "json",
             "check": _wire_cc_check,
             "patch": _wire_cc_patch,
             "unpatch": _wire_cc_unpatch,
         },
+        "openclaw": {
+            "binary": "openclaw",
+            "config": Path.home() / ".openclaw" / "config.yaml",
+            "kind": "cli",
+            "check_text": _wire_openclaw_check_text,
+            "wire_run": _wire_openclaw_run,
+        },
+        "hermes": {
+            "binary": "hermes",
+            "config": Path.home() / ".hermes" / "config.yaml",
+            "kind": "cli",
+            "check_text": _wire_hermes_check_text,
+            "wire_run": _wire_hermes_run,
+        },
     }
+
+
+def _is_wired(t: dict) -> bool:
+    """Generic wiring check across json + cli kinds."""
+    cfg_path = t["config"]
+    if t.get("kind") == "cli":
+        text = cfg_path.read_text() if cfg_path.exists() else ""
+        return t["check_text"](text)
+    cfg = _load_config(cfg_path) if cfg_path.exists() else {}
+    return t["check"](cfg)
 
 
 def _tool_installed(binary: str) -> bool:
@@ -1368,11 +1430,9 @@ def cmd_detect(args) -> int:
         if not installed:
             print(f"{name:<10} {C.D}no{C.R:<19} {'—':<50} {C.D}(not installed){C.R}")
             continue
-        cfg_path = t["config"]
-        cfg = _load_config(cfg_path) if cfg_path.exists() else {}
-        wired = t["check"](cfg)
+        wired = _is_wired(t)
         status = f"{C.G}wired to fi{C.R}" if wired else f"{C.Y}not wired{C.R}"
-        cfg_display = str(cfg_path)
+        cfg_display = str(t["config"])
         if len(cfg_display) > 49:
             cfg_display = "…" + cfg_display[-48:]
         print(f"{name:<10} {C.G}yes{C.R:<19} {cfg_display:<50} {status}")
@@ -1393,18 +1453,24 @@ def cmd_wire(args) -> int:
         master = ensure_master_key()
         out(f"{C.D}generated master key (will be used by {args.tool}){C.R}")
     cfg_path = t["config"]
-    cfg = _load_config(cfg_path) if cfg_path.exists() else {}
-    if t["check"](cfg):
+    if _is_wired(t):
         out(f"{args.tool} is already wired to fi. Run `./fi unwire {args.tool}` to undo.")
         return 0
     if cfg_path.exists():
         backup = _backup_path(cfg_path)
         backup.write_text(cfg_path.read_text())
         ok(f"backed up {cfg_path} → {backup}")
-    new_cfg = t["patch"](cfg, master)
-    # settings.json should be 600 for Claude Code so keys aren't world-readable
-    mode = 0o600 if args.tool == "cc" else None
-    _save_config(cfg_path, new_cfg, mode=mode)
+    if t.get("kind") == "cli":
+        # The tool owns its config format — shell out to its CLI.
+        rc = t["wire_run"](master)
+        if rc != 0:
+            err(f"{args.tool} CLI returned exit {rc}; check the output above.")
+            return rc
+    else:
+        cfg = _load_config(cfg_path) if cfg_path.exists() else {}
+        new_cfg = t["patch"](cfg, master)
+        mode = 0o600 if args.tool == "cc" else None
+        _save_config(cfg_path, new_cfg, mode=mode)
     ok(f"wired {args.tool} — config at {cfg_path}")
     out(f"  - base URL: {FI_OPENAI_URL if args.tool != 'cc' else FI_ANTHROPIC_URL}")
     out(f"  - master key: {mask(master)}")
@@ -1427,6 +1493,13 @@ def cmd_unwire(args) -> int:
         return 0
     if not cfg_path.exists():
         out(f"no config at {cfg_path} — nothing to unwire")
+        return 0
+    if t.get("kind") == "cli":
+        # CLI-managed configs don't have a clean structured undo without
+        # a backup. The wire flow always writes one before calling the
+        # tool's CLI, so this branch only fires if the user deleted the
+        # backup or wired manually.
+        out(f"no backup found at {backup}; manually edit {cfg_path} to remove the fi block")
         return 0
     cfg = _load_config(cfg_path)
     if not t["check"](cfg):
@@ -1494,10 +1567,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("detect", help="Scan for installed client CLIs (pi, opencode, cc) and show wiring status").set_defaults(fn=cmd_detect)
     pw = sub.add_parser("wire", help="Wire a client CLI to the fi gateway (edits its config, saves .fi-backup)")
-    pw.add_argument("tool", choices=["pi", "opencode", "cc"])
+    pw.add_argument("tool", choices=["pi", "opencode", "cc", "openclaw", "hermes"])
     pw.set_defaults(fn=cmd_wire)
     pu = sub.add_parser("unwire", help="Remove fi from a client CLI's config (restores from .fi-backup if present)")
-    pu.add_argument("tool", choices=["pi", "opencode", "cc"])
+    pu.add_argument("tool", choices=["pi", "opencode", "cc", "openclaw", "hermes"])
     pu.set_defaults(fn=cmd_unwire)
 
     pan = sub.add_parser("test-anthropic", help="Anthropic-shape /v1/messages smoke test")

@@ -63,7 +63,7 @@ Drive the CLI directly with `./fi`:
 ./fi test <model> [--prompt P]              OpenAI shape
 ./fi test-anthropic <model> [--prompt P]    Anthropic shape (/v1/messages)
 
-./fi detect                                 Scan for installed client CLIs (pi, opencode, cc)
+./fi detect                                 Scan for installed client CLIs (pi, opencode, cc, openclaw, hermes)
 ./fi wire <tool>                            Edit client config so it routes through fi (backs up to .fi-backup)
 ./fi unwire <tool>                          Restore the client config from the backup
 ```
@@ -123,15 +123,17 @@ Results cache 24h at `~/.config/free-inference/.discovery-cache.json`. Users can
 
 ## Wiring coding-agent CLIs
 
-`./fi detect` / `./fi wire <tool>` / `./fi unwire <tool>` auto-configure three client CLIs to route through the gateway. Each `wire` backs up the original config to `<path>.fi-backup`; `unwire` restores from it.
+`./fi detect` / `./fi wire <tool>` / `./fi unwire <tool>` auto-configure five client CLIs to route through the gateway. Each `wire` backs up the original config to `<path>.fi-backup`; `unwire` restores from it.
 
-| Tool  | Binary    | Config file                                        | What gets written |
-|-------|-----------|----------------------------------------------------|-------------------|
-| `cc`  | `claude`  | `~/.claude/settings.json`                          | `env.ANTHROPIC_BASE_URL=http://localhost:4000` + master key. Settings chmod 600. |
-| `opencode` | `opencode` | `~/.config/opencode/opencode.json`          | `provider.fi` block with `@ai-sdk/openai-compatible`, localhost:4000/v1, master key, and a curated default model list (Gemini Flash, Llama 3.3 70B, DeepSeek V3.2, Qwen3 Coder 480B, OpenRouter free router, LLM7 GPT-OSS). Edit the config to add more. |
-| `pi`  | `pi`      | `~/.pi/agent/models.json`                          | `providers.fi` with `api: openai-completions`, localhost:4000/v1, same curated default model list. |
+| Tool  | Binary    | Config file                                        | Mechanism | What gets written |
+|-------|-----------|----------------------------------------------------|-----------|-------------------|
+| `cc`  | `claude`  | `~/.claude/settings.json`                          | direct JSON edit | `env.ANTHROPIC_BASE_URL` + master key, settings chmod 600 |
+| `opencode` | `opencode` | `~/.config/opencode/opencode.json`           | direct JSON edit | `provider.fi` block (`@ai-sdk/openai-compatible`, localhost:4000/v1, curated default models: Gemini Flash, Llama 3.3 70B, DeepSeek V3.2, Qwen3 Coder 480B, OR free, LLM7 GPT-OSS) |
+| `pi`  | `pi`      | `~/.pi/agent/models.json`                          | direct JSON edit | `providers.fi` (`api: openai-completions`, localhost:4000/v1, same curated default model list) |
+| `openclaw` | `openclaw` | `~/.openclaw/config.yaml`                     | shells out to `openclaw onboard --custom-base-url …` | OpenClaw's onboarding wizard registers fi as a custom OpenAI-compatible provider |
+| `hermes` | `hermes` | `~/.hermes/config.yaml`                          | shells out to `hermes config set model.…` | Sets `model.provider=custom`, `base_url`, `api_key`, and `default` |
 
-Trigger phrases: "wire Claude Code to fi", "point my CLI at fi", "set up fi for opencode", "detect my coding agents", "undo the fi wiring".
+Trigger phrases: "wire Claude Code to fi", "wire openclaw / hermes / pi to fi", "point my CLI at fi", "set up fi for opencode", "detect my coding agents", "undo the fi wiring".
 
 After wiring, tell the user to run `./fi start` if the proxy isn't up yet — the edited configs are harmless when localhost:4000 is unreachable (clients just error at request time).
 
