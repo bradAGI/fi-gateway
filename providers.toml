@@ -1,0 +1,416 @@
+# fi catalog — single source of truth for which providers/models exist.
+# Adding a provider = appending a [[provider]] block here, then `fi reload`.
+#
+# Each [[provider]] declares how to authenticate. Each [[provider.model]]
+# declares one upstream model and which fi groups it belongs to (fast/smart/
+# vision/embed/rerank/code). Groups become alias model names like "fast" that
+# the router picks under-quota deployments for at request time.
+
+# ---------------------------------------------------------------------------
+# Tier 1: truly free providers
+# ---------------------------------------------------------------------------
+
+[[provider]]
+name = "gemini"
+key_env = "GEMINI_API_KEY"
+litellm_prefix = "gemini"
+
+[[provider.model]]
+alias = "gemini-2.5-pro"
+upstream = "gemini-2.5-pro"
+rpm = 1000
+tpm = 5_000_000
+groups = ["smart", "vision"]
+
+[[provider.model]]
+alias = "gemini-2.5-flash"
+upstream = "gemini-2.5-flash"
+rpm = 2000
+tpm = 3_000_000
+groups = ["fast", "vision", "default"]
+
+[[provider.model]]
+alias = "gemini-2.5-flash-lite"
+upstream = "gemini-2.5-flash-lite"
+rpm = 10000
+tpm = 10_000_000
+groups = ["fast", "cheap"]
+
+[[provider.model]]
+alias = "gemini-embedding-2"
+upstream = "gemini-embedding-2"
+rpm = 5000
+tpm = 5_000_000
+groups = ["embed"]
+
+# ---
+
+[[provider]]
+name = "groq"
+key_env = "GROQ_API_KEY"
+litellm_prefix = "groq"
+
+[[provider.model]]
+alias = "llama-3.3-70b-groq"
+upstream = "llama-3.3-70b-versatile"
+rpm = 30
+groups = ["fast", "smart"]
+
+[[provider.model]]
+alias = "qwen3-32b-groq"
+upstream = "qwen-3-32b"
+rpm = 30
+groups = ["fast"]
+
+[[provider.model]]
+alias = "kimi-k2-groq"
+upstream = "kimi-k2"
+rpm = 30
+groups = ["smart"]
+
+# ---
+
+[[provider]]
+name = "openrouter"
+key_env = "OPENROUTER_API_KEY"
+litellm_prefix = "openrouter"
+discovery = "openrouter_free"
+# All free OpenRouter models are auto-discovered from
+# https://openrouter.ai/api/v1/models (filtered to pricing.prompt == 0).
+# Cached 24h in ~/.config/free-inference/.discovery-cache.json.
+# Run `./fi sync` to refresh on demand. Manual [[provider.model]] blocks
+# can still be added below — they merge with the discovered list.
+
+# ---
+
+[[provider]]
+name = "cerebras"
+key_env = "CEREBRAS_API_KEY"
+litellm_prefix = "cerebras"
+
+[[provider.model]]
+alias = "llama-3.3-70b-cerebras"
+upstream = "llama-3.3-70b"
+rpm = 30
+groups = ["fast", "smart"]
+
+[[provider.model]]
+alias = "qwen3-235b-cerebras"
+upstream = "qwen-3-235b-a22b"
+rpm = 30
+groups = ["smart"]
+
+# ---
+
+[[provider]]
+name = "mistral"
+key_env = "MISTRAL_API_KEY"
+litellm_prefix = "mistral"
+
+[[provider.model]]
+alias = "codestral"
+upstream = "codestral-latest"
+rpm = 2
+groups = ["code"]
+
+[[provider.model]]
+alias = "mistral-large"
+upstream = "mistral-large-latest"
+rpm = 2
+groups = ["smart"]
+
+# ---
+
+[[provider]]
+name = "nvidia"
+key_env = "NVIDIA_API_KEY"
+litellm_prefix = "nvidia_nim"
+discovery = "nvidia_nim"
+# All NVIDIA NIM endpoints (~135 models) auto-discovered via /v1/models.
+# Free signup credits (1k–5k) cover all of them. Run `./fi sync` to refresh.
+# Uses LiteLLM's dedicated nvidia_nim prefix so /v1/messages translates
+# correctly (the openai prefix routes /v1/messages through OpenAI's new
+# Responses API which NVIDIA doesn't expose).
+
+# ---
+
+[[provider]]
+name = "huggingface"
+key_env = "HF_TOKEN"
+litellm_prefix = "huggingface"
+discovery = "huggingface_inference"
+# Auto-discovered from huggingface.co/api/models filtered to free
+# inference_provider=hf-inference, text-generation only, limit 200.
+# Add manual entries below for paid HF inference providers (Together,
+# Fireworks, etc. via HF routing) if desired.
+
+# ---
+
+[[provider]]
+name = "github"
+key_env = "GITHUB_MODELS_TOKEN"
+base_url = "https://models.github.ai/inference"
+litellm_prefix = "openai"
+
+[[provider.model]]
+alias = "gpt-4o-github"
+upstream = "openai/gpt-4o"
+rpm = 10
+groups = ["smart", "vision"]
+
+[[provider.model]]
+alias = "gpt-4.1-github"
+upstream = "openai/gpt-4.1"
+rpm = 10
+groups = ["smart"]
+
+[[provider.model]]
+alias = "o3-github"
+upstream = "openai/o3"
+rpm = 10
+groups = ["reasoning"]
+
+# ---
+
+[[provider]]
+name = "cohere"
+key_env = "COHERE_API_KEY"
+litellm_prefix = "cohere"
+
+[[provider.model]]
+alias = "command-r-plus"
+upstream = "command-r-plus"
+rpm = 20
+groups = ["smart"]
+
+[[provider.model]]
+alias = "embed-4"
+upstream = "embed-v4.0"
+rpm = 20
+groups = ["embed"]
+
+[[provider.model]]
+alias = "rerank-3.5"
+upstream = "rerank-v3.5"
+rpm = 20
+groups = ["rerank"]
+
+# ---
+
+[[provider]]
+name = "together"
+key_env = "TOGETHER_API_KEY"
+litellm_prefix = "together_ai"
+
+[[provider.model]]
+alias = "llama-3.3-70b-together"
+upstream = "meta-llama/Llama-3.3-70B-Instruct-Turbo-Free"
+groups = ["smart"]
+
+# ---
+
+[[provider]]
+name = "scaleway"
+key_env = "SCALEWAY_API_KEY"
+base_url = "https://api.scaleway.ai/v1"
+litellm_prefix = "openai"
+
+[[provider.model]]
+alias = "qwen3.5-397b-scaleway"
+upstream = "qwen3.5-397b-a17b"
+groups = ["smart", "code", "vision"]
+
+[[provider.model]]
+alias = "gpt-oss-120b-scaleway"
+upstream = "gpt-oss-120b"
+groups = ["smart"]
+
+[[provider.model]]
+alias = "llama-3.3-70b-scaleway"
+upstream = "llama-3.3-70b-instruct"
+groups = ["smart"]
+
+[[provider.model]]
+alias = "qwen3-embedding-scaleway"
+upstream = "qwen3-embedding-8b"
+groups = ["embed"]
+
+[[provider.model]]
+alias = "whisper-scaleway"
+upstream = "whisper-large-v3"
+groups = ["transcribe"]
+
+# ---
+
+[[provider]]
+name = "voyage"
+key_env = "VOYAGE_API_KEY"
+litellm_prefix = "voyage"
+
+[[provider.model]]
+alias = "voyage-4"
+upstream = "voyage-4"
+groups = ["embed"]
+
+[[provider.model]]
+alias = "voyage-4-large"
+upstream = "voyage-4-large"
+groups = ["embed"]
+
+[[provider.model]]
+alias = "voyage-code-3"
+upstream = "voyage-code-3"
+groups = ["embed", "code"]
+
+[[provider.model]]
+alias = "rerank-2.5"
+upstream = "rerank-2.5"
+groups = ["rerank"]
+
+# ---
+
+[[provider]]
+name = "jina"
+key_env = "JINA_API_KEY"
+base_url = "https://api.jina.ai/v1"
+litellm_prefix = "openai"
+
+[[provider.model]]
+alias = "jina-embeddings-v5"
+upstream = "jina-embeddings-v5-text-small"
+rpm = 100
+tpm = 100_000
+groups = ["embed"]
+
+[[provider.model]]
+alias = "jina-reranker-v3"
+upstream = "jina-reranker-v3"
+rpm = 100
+groups = ["rerank"]
+
+# ---
+
+[[provider]]
+name = "mixedbread"
+key_env = "MXBAI_API_KEY"
+base_url = "https://api.mixedbread.com/v1"
+litellm_prefix = "openai"
+
+[[provider.model]]
+alias = "mxbai-embed-large"
+upstream = "mixedbread-ai/mxbai-embed-large-v1"
+groups = ["embed"]
+
+[[provider.model]]
+alias = "mxbai-rerank-large-v2"
+upstream = "mixedbread-ai/mxbai-rerank-large-v2"
+groups = ["rerank"]
+
+# ---
+
+[[provider]]
+name = "nomic"
+key_env = "NOMIC_API_KEY"
+base_url = "https://api-atlas.nomic.ai/v1"
+litellm_prefix = "openai"
+
+[[provider.model]]
+alias = "nomic-embed-text"
+upstream = "nomic-embed-text-v1.5"
+groups = ["embed"]
+
+# ---
+
+[[provider]]
+name = "hunyuan"
+key_env = "HUNYUAN_API_KEY"
+base_url = "https://api.hunyuan.cloud.tencent.com/v1"
+litellm_prefix = "openai"
+
+[[provider.model]]
+alias = "hunyuan-lite"
+upstream = "hunyuan-lite"
+groups = ["fast", "cheap"]
+
+[[provider.model]]
+alias = "hunyuan-standard"
+upstream = "hunyuan-standard"
+groups = ["smart"]
+
+# ---
+
+[[provider]]
+name = "chutes"
+key_env = "CHUTES_API_KEY"
+base_url = "https://chutes.ai/v1"
+litellm_prefix = "openai"
+
+[[provider.model]]
+alias = "deepseek-v3-chutes"
+upstream = "deepseek-ai/DeepSeek-V3"
+groups = ["smart"]
+
+[[provider.model]]
+alias = "qwen3-coder-chutes"
+upstream = "Qwen/Qwen3-Coder-30B-A3B-Instruct"
+groups = ["code"]
+
+# ---
+
+[[provider]]
+name = "pollinations"
+key_env = "POLLINATIONS_API_KEY"  # optional — works without key
+base_url = "https://gen.pollinations.ai"
+litellm_prefix = "openai"
+optional_key = true  # provider works even when key is absent
+discovery = "pollinations"
+# Models auto-discovered from gen.pollinations.ai/v1/models, filtered to
+# those advertising /v1/chat/completions. Pollinations is keyless —
+# discovery runs as soon as the provider appears in the catalog.
+
+# ---
+
+[[provider]]
+name = "llm7"
+key_env = "LLM7_API_KEY"
+base_url = "https://api.llm7.io/v1"
+litellm_prefix = "openai"
+optional_key = true
+
+[[provider.model]]
+alias = "gpt-oss-llm7"
+upstream = "gpt-oss-20b"
+groups = ["fast"]
+
+[[provider.model]]
+alias = "codestral-llm7"
+upstream = "codestral-latest"
+groups = ["code"]
+
+[[provider.model]]
+alias = "glm-4.6v-llm7"
+upstream = "glm-4.6v-flash"
+groups = ["vision"]
+
+# ---
+
+[[provider]]
+name = "ollama-cloud"
+key_env = "OLLAMA_CLOUD_API_KEY"
+base_url = "https://ollama.com/v1"
+litellm_prefix = "openai"
+
+[[provider.model]]
+alias = "deepseek-v3.2-ollama"
+upstream = "deepseek-v3.2:cloud"
+groups = ["smart", "reasoning"]
+
+[[provider.model]]
+alias = "kimi-k2.5-ollama"
+upstream = "kimi-k2.5:1t-cloud"
+groups = ["smart"]
+
+[[provider.model]]
+alias = "qwen3-coder-ollama"
+upstream = "qwen3-coder:480b-cloud"
+groups = ["code"]

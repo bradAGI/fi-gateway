@@ -1,0 +1,775 @@
+#!/usr/bin/env python3
+"""fi — lightweight CLI for the free-inference gateway.
+
+Single file, stdlib only (Python 3.11+). Drives `docker compose` to run a
+LiteLLM proxy that exposes all your free API keys behind one OpenAI- and
+Anthropic-compatible endpoint.
+
+Usage:
+    ./fi --help
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import secrets
+import subprocess
+import sys
+import time
+import tomllib
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+GATEWAY_DIR = Path(__file__).resolve().parent
+HOME = Path(os.environ.get("FI_HOME") or Path.home() / ".config" / "free-inference").expanduser()
+KEYS_ENV = HOME / "keys.env"
+CONFIG_YAML = HOME / "config.yaml"
+DISCOVERY_CACHE = HOME / ".discovery-cache.json"
+DISCOVERY_TTL = 24 * 3600
+PROVIDERS_TOML = GATEWAY_DIR / "providers.toml"
+COMPOSE_FILE = GATEWAY_DIR / "docker-compose.yml"
+PORT = int(os.environ.get("FI_PORT", "4000"))
+
+
+# --- pretty output --------------------------------------------------------
+
+class C:
+    R = "\033[0m"; G = "\033[32m"; Y = "\033[33m"
+    RD = "\033[31m"; D = "\033[2m"; B = "\033[1m"
+
+def out(msg: str = "") -> None: print(msg)
+def err(msg: str) -> None: print(f"{C.RD}{msg}{C.R}", file=sys.stderr)
+def ok(msg: str) -> None: print(f"{C.G}✓{C.R} {msg}")
+def info(label: str, value: str) -> None: print(f"{C.B}{label}:{C.R} {value}")
+
+
+# --- catalog --------------------------------------------------------------
+
+def load_catalog(refresh_discovery: bool = False) -> list[dict]:
+    with PROVIDERS_TOML.open("rb") as f:
+        catalog = tomllib.load(f).get("provider", [])
+    grouped = grouped_keys()
+    for prov in catalog:
+        kind = prov.get("discovery")
+        if not kind:
+            continue
+        # Skip discovery for providers without a key — avoids spurious network
+        # calls from commands like `./fi keys add`, and hides models the user
+        # can't actually call.
+        if not (grouped.get(prov["key_env"]) or prov.get("optional_key")):
+            continue
+        discovered = _run_discovery(kind, refresh=refresh_discovery)
+        existing = {m["alias"] for m in prov.get("model", [])}
+        prov.setdefault("model", [])
+        for m in discovered:
+            if m["alias"] not in existing:
+                prov["model"].append(m)
+    return catalog
+
+def find_provider(name: str) -> dict:
+    for p in load_catalog():
+        if p["name"] == name:
+            return p
+    err(f"unknown provider: {name}")
+    sys.exit(1)
+
+
+# --- dynamic discovery ----------------------------------------------------
+
+def _load_discovery_cache(key: str, ignore_ttl: bool = False) -> list[dict] | None:
+    if not DISCOVERY_CACHE.exists():
+        return None
+    try:
+        cache = json.loads(DISCOVERY_CACHE.read_text())
+    except Exception:
+        return None
+    entry = cache.get(key)
+    if not entry:
+        return None
+    if not ignore_ttl and time.time() - entry["t"] > DISCOVERY_TTL:
+        return None
+    return entry["models"]
+
+def _save_discovery_cache(key: str, models: list[dict]) -> None:
+    HOME.mkdir(parents=True, exist_ok=True)
+    cache: dict = {}
+    if DISCOVERY_CACHE.exists():
+        try:
+            cache = json.loads(DISCOVERY_CACHE.read_text())
+        except Exception:
+            cache = {}
+    cache[key] = {"t": time.time(), "models": models}
+    DISCOVERY_CACHE.write_text(json.dumps(cache))
+
+def _run_discovery(kind: str, refresh: bool = False) -> list[dict]:
+    handlers = {
+        "openrouter_free": _fetch_openrouter_free_models,
+        "nvidia_nim": _fetch_nvidia_models,
+        "huggingface_inference": _fetch_huggingface_models,
+        "pollinations": _fetch_pollinations_models,
+    }
+    handler = handlers.get(kind)
+    if not handler:
+        err(f"unknown discovery kind: {kind}")
+        return []
+    return handler(refresh=refresh)
+
+
+def _fetch_nvidia_models(refresh: bool = False) -> list[dict]:
+    if not refresh:
+        cached = _load_discovery_cache("nvidia_nim")
+        if cached is not None:
+            return cached
+    keys_for = grouped_keys().get("NVIDIA_API_KEY", [])
+    if not keys_for:
+        return []
+    token = load_keys()[keys_for[0]]
+    print(f"{C.D}discovering nvidia nim models…{C.R}", file=sys.stderr)
+    try:
+        req = urllib.request.Request(
+            "https://integrate.api.nvidia.com/v1/models",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = json.loads(r.read())
+    except Exception as e:
+        err(f"nvidia discovery failed: {e}")
+        return _load_discovery_cache("nvidia_nim", ignore_ttl=True) or []
+    out = []
+    for m in data.get("data", []):
+        mid = m.get("id", "")
+        if not mid:
+            continue
+        out.append({
+            "alias": mid,
+            "upstream": mid,
+            "groups": _infer_nvidia_groups(mid),
+        })
+    _save_discovery_cache("nvidia_nim", out)
+    return out
+
+
+def _infer_nvidia_groups(mid: str) -> list[str]:
+    out = ["nvidia", "free"]
+    name = mid.lower()
+    if any(t in name for t in ("vl", "vision", "multimodal", "paligemma", "vlm")):
+        out.append("vision")
+    if any(t in name for t in ("coder", "codestral", "devstral", "code-")):
+        out.append("code")
+    if any(t in name for t in ("r1", "thinking", "reasoning", "qwq", "magistral", "o1-", "o3-")):
+        out.append("reasoning")
+    if "embed" in name:
+        out.append("embed")
+    if "rerank" in name:
+        out.append("rerank")
+    if any(t in name for t in ("nano", "small", "lite", "flash", "mini", "8b", "9b")):
+        out.append("fast")
+    if any(t in name for t in ("70b", "120b", "235b", "405b", "480b", "675b", "685b", "1t")):
+        out.append("smart")
+    return out
+
+
+def _fetch_huggingface_models(refresh: bool = False) -> list[dict]:
+    if not refresh:
+        cached = _load_discovery_cache("huggingface_inference")
+        if cached is not None:
+            return cached
+    keys_for = grouped_keys().get("HF_TOKEN", [])
+    if not keys_for:
+        return []
+    token = load_keys()[keys_for[0]]
+    print(f"{C.D}discovering huggingface inference models…{C.R}", file=sys.stderr)
+    try:
+        req = urllib.request.Request(
+            "https://router.huggingface.co/v1/models",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.loads(r.read())
+    except Exception as e:
+        err(f"huggingface discovery failed: {e}")
+        return _load_discovery_cache("huggingface_inference", ignore_ttl=True) or []
+    # HF gives every user $0.10/month free credits ($2/mo PRO) usable across
+    # any routed model. So "free via HF" = any model with at least one live
+    # provider; the user pays from credits at request time.
+    out = []
+    for m in data.get("data", []):
+        mid = m.get("id")
+        if not mid:
+            continue
+        providers = m.get("providers") or []
+        live = [p for p in providers if p.get("status") == "live"]
+        if not live:
+            continue
+        # Mark models that have at least one zero-priced provider so users can
+        # filter to those if they want truly-free routes (no credit drain).
+        has_free = any(
+            _is_free_pricing({
+                "prompt": (p.get("pricing") or {}).get("input"),
+                "completion": (p.get("pricing") or {}).get("output"),
+            })
+            or p.get("provider") == "hf-inference"
+            for p in live
+        )
+        out.append({
+            "alias": f"hf/{mid}",
+            "upstream": mid,
+            "groups": _infer_hf_groups(mid, m.get("architecture") or {}, has_free),
+        })
+    _save_discovery_cache("huggingface_inference", out)
+    return out
+
+
+def _fetch_pollinations_models(refresh: bool = False) -> list[dict]:
+    if not refresh:
+        cached = _load_discovery_cache("pollinations")
+        if cached is not None:
+            return cached
+    print(f"{C.D}discovering pollinations models…{C.R}", file=sys.stderr)
+    try:
+        with urllib.request.urlopen(
+            "https://gen.pollinations.ai/v1/models", timeout=15
+        ) as r:
+            data = json.loads(r.read())
+    except Exception as e:
+        err(f"pollinations discovery failed: {e}")
+        return _load_discovery_cache("pollinations", ignore_ttl=True) or []
+    out = []
+    for m in data.get("data", []):
+        mid = m.get("id")
+        endpoints = m.get("supported_endpoints") or []
+        if not mid or "/v1/chat/completions" not in endpoints:
+            continue
+        out.append({
+            "alias": f"poll/{mid}",
+            "upstream": mid,
+            "groups": _infer_pollinations_groups(m),
+        })
+    _save_discovery_cache("pollinations", out)
+    return out
+
+
+def _infer_pollinations_groups(m: dict) -> list[str]:
+    out = ["pollinations", "free"]
+    mid = (m.get("id") or "").lower()
+    modalities = m.get("input_modalities") or []
+    if "image" in modalities:
+        out.append("vision")
+    if m.get("reasoning"):
+        out.append("reasoning")
+    if any(t in mid for t in ("coder", "code-")):
+        out.append("code")
+    if any(t in mid for t in ("fast", "lite", "flash", "mini", "small")):
+        out.append("fast")
+    if any(t in mid for t in ("large", "pro", "ultra")):
+        out.append("smart")
+    return out
+
+
+def _infer_hf_groups(mid: str, arch: dict | None = None, has_zero_priced: bool = False) -> list[str]:
+    out = ["huggingface"]
+    if has_zero_priced:
+        out.append("free")
+    name = mid.lower()
+    modalities = (arch or {}).get("input_modalities") or []
+    if "image" in modalities or any(t in name for t in ("vl", "vision", "vlm", "llava", "paligemma")):
+        out.append("vision")
+    if any(t in name for t in ("coder", "codellama", "code-", "codestral", "devstral")):
+        out.append("code")
+    if any(t in name for t in ("r1", "qwq", "thinking", "reasoning", "magistral", "o1-", "o3-")):
+        out.append("reasoning")
+    if "embed" in name:
+        out.append("embed")
+    return out
+
+def _fetch_openrouter_free_models(refresh: bool = False) -> list[dict]:
+    if not refresh:
+        cached = _load_discovery_cache("openrouter_free")
+        if cached is not None:
+            return cached
+    print(f"{C.D}discovering openrouter free models…{C.R}", file=sys.stderr)
+    try:
+        with urllib.request.urlopen(
+            "https://openrouter.ai/api/v1/models", timeout=20
+        ) as r:
+            data = json.loads(r.read())
+    except Exception as e:
+        err(f"openrouter discovery failed: {e}")
+        return _load_discovery_cache("openrouter_free", ignore_ttl=True) or []
+    free: list[dict] = []
+    for m in data.get("data", []):
+        pricing = m.get("pricing") or {}
+        if not _is_free_pricing(pricing):
+            continue
+        free.append({
+            "alias": m["id"],
+            "upstream": m["id"],
+            "groups": _infer_or_groups(m),
+        })
+    _save_discovery_cache("openrouter_free", free)
+    return free
+
+def _is_free_pricing(pricing: dict) -> bool:
+    def zero(v) -> bool:
+        try:
+            return float(v) == 0.0
+        except (TypeError, ValueError):
+            return False
+    return zero(pricing.get("prompt")) and zero(pricing.get("completion"))
+
+def _infer_or_groups(m: dict) -> list[str]:
+    out = ["free", "openrouter"]
+    name = (m.get("id") or "").lower()
+    arch = m.get("architecture") or {}
+    modalities = arch.get("input_modalities") or []
+    if "image" in modalities or "vision" in name or "-vl-" in name or "vl-" in name:
+        out.append("vision")
+    if any(t in name for t in ("coder", "-code-", "codestral", "devstral")):
+        out.append("code")
+    if any(t in name for t in (":r1", "/r1-", "o1-", "o3-", "thinking", "reasoning", "qwq", "magistral")):
+        out.append("reasoning")
+    if "embed" in name:
+        out.append("embed")
+    return out
+
+
+# --- keystore -------------------------------------------------------------
+
+_LINE = re.compile(r"^([A-Z][A-Z0-9_]*)=(.*)$")
+
+def load_keys() -> dict[str, str]:
+    if not KEYS_ENV.exists():
+        return {}
+    result: dict[str, str] = {}
+    for raw in KEYS_ENV.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = _LINE.match(line)
+        if m:
+            result[m.group(1)] = m.group(2)
+    return result
+
+def save_keys(values: dict[str, str]) -> None:
+    HOME.mkdir(parents=True, exist_ok=True)
+    KEYS_ENV.write_text("".join(f"{k}={v}\n" for k, v in values.items()))
+    KEYS_ENV.chmod(0o600)
+
+def grouped_keys() -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    for name in load_keys():
+        base = re.sub(r"_\d+$", "", name)
+        result.setdefault(base, []).append(name)
+    return result
+
+def add_key(key_env: str, value: str) -> str:
+    values = load_keys()
+    idx = 1
+    while f"{key_env}_{idx}" in values:
+        idx += 1
+    name = f"{key_env}_{idx}"
+    values[name] = value
+    save_keys(values)
+    return name
+
+def remove_key(key_env: str, index: int | None = None) -> list[str]:
+    values = load_keys()
+    removed: list[str] = []
+    if index is not None:
+        name = f"{key_env}_{index}"
+        if name in values:
+            del values[name]
+            removed.append(name)
+    else:
+        for name in list(values):
+            if name == key_env or name.startswith(f"{key_env}_"):
+                del values[name]
+                removed.append(name)
+    if removed:
+        save_keys(values)
+    return removed
+
+def ensure_master_key() -> str:
+    values = load_keys()
+    if "LITELLM_MASTER_KEY" in values:
+        return values["LITELLM_MASTER_KEY"]
+    key = "sk-fi-" + secrets.token_urlsafe(32)
+    values["LITELLM_MASTER_KEY"] = key
+    save_keys(values)
+    return key
+
+def mask(value: str) -> str:
+    return "•" * len(value) if len(value) <= 8 else f"{value[:4]}…{value[-4:]}"
+
+
+# --- config generation ----------------------------------------------------
+
+def _yaml_str(s: str) -> str:
+    """Emit a string safe for our subset of YAML."""
+    if any(c in s for c in ":#\n\"'") or s.strip() != s:
+        return json.dumps(s)
+    return s
+
+def render_config(catalog: list[dict], grouped: dict[str, list[str]]) -> str:
+    """Render LiteLLM config.yaml. Hand-written to avoid PyYAML."""
+    lines = ["model_list:"]
+    group_to_model: dict[str, list[tuple[dict, dict, str | None]]] = {}
+
+    for prov in catalog:
+        key_vars = grouped.get(prov["key_env"], [])
+        optional = prov.get("optional_key", False)
+        if not key_vars and not optional:
+            continue
+        effective: list[str | None] = list(key_vars) if key_vars else [None]
+
+        for model in prov.get("model", []):
+            for key_var in effective:
+                lines.append(f"  - model_name: {_yaml_str(model['alias'])}")
+                lines.append("    litellm_params:")
+                lines.append(f"      model: {_yaml_str(prov['litellm_prefix'] + '/' + model['upstream'])}")
+                # LiteLLM's openai driver requires an api_key even for keyless
+                # endpoints; pass a dummy when the provider is optional_key.
+                if key_var:
+                    lines.append(f"      api_key: os.environ/{key_var}")
+                else:
+                    lines.append(f"      api_key: unused")
+                if prov.get("base_url"):
+                    lines.append(f"      api_base: {_yaml_str(prov['base_url'])}")
+                if model.get("rpm"):
+                    lines.append(f"      rpm: {model['rpm']}")
+                if model.get("tpm"):
+                    lines.append(f"      tpm: {model['tpm']}")
+            for group in model.get("groups", []):
+                group_to_model.setdefault(group, []).append((prov, model, effective[0]))
+
+    for group, members in group_to_model.items():
+        seen: set[str] = set()
+        for prov, model, key_var in members:
+            if model["alias"] in seen:
+                continue
+            seen.add(model["alias"])
+            lines.append(f"  - model_name: {group}")
+            lines.append("    litellm_params:")
+            lines.append(f"      model: {_yaml_str(prov['litellm_prefix'] + '/' + model['upstream'])}")
+            if key_var:
+                lines.append(f"      api_key: os.environ/{key_var}")
+            else:
+                lines.append(f"      api_key: unused")
+            if prov.get("base_url"):
+                lines.append(f"      api_base: {_yaml_str(prov['base_url'])}")
+
+    lines += [
+        "router_settings:",
+        "  routing_strategy: usage-based-routing-v2",
+        "  num_retries: 2",
+        "  allowed_fails: 2",
+        "  cooldown_time: 30",
+        "general_settings:",
+        "  master_key: os.environ/LITELLM_MASTER_KEY",
+        "litellm_settings:",
+        "  drop_params: true",
+        "",
+    ]
+    return "\n".join(lines)
+
+def write_config() -> list[dict]:
+    ensure_master_key()
+    catalog = load_catalog()
+    grouped = grouped_keys()
+    HOME.mkdir(parents=True, exist_ok=True)
+    CONFIG_YAML.write_text(render_config(catalog, grouped))
+    return [p for p in catalog if grouped.get(p["key_env"]) or p.get("optional_key")]
+
+
+# --- docker compose -------------------------------------------------------
+
+def compose(*args: str, capture: bool = False) -> subprocess.CompletedProcess:
+    env = dict(os.environ)
+    env["FI_HOME"] = str(HOME)
+    return subprocess.run(
+        ["docker", "compose", "-f", str(COMPOSE_FILE), *args],
+        env=env,
+        check=False,
+        text=True,
+        capture_output=capture,
+    )
+
+
+# --- health probes --------------------------------------------------------
+
+def base_url() -> str:
+    return f"http://localhost:{PORT}"
+
+def is_alive(timeout: float = 2.0) -> bool:
+    try:
+        with urllib.request.urlopen(f"{base_url()}/health/liveliness", timeout=timeout) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+def wait_alive(deadline: float = 60.0) -> bool:
+    start = time.monotonic()
+    while time.monotonic() - start < deadline:
+        if is_alive():
+            return True
+        time.sleep(1)
+    return False
+
+def post(path: str, body: dict, headers: dict, timeout: float = 60.0) -> dict:
+    req = urllib.request.Request(
+        f"{base_url()}{path}",
+        data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", **headers},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read())
+
+
+# --- commands -------------------------------------------------------------
+
+def cmd_start(args) -> int:
+    active = write_config()
+    if not active:
+        err("No providers active — add a key first: ./fi keys add <provider> <key>")
+        return 1
+    info("Active providers", ", ".join(p["name"] for p in active))
+    info("Config", str(CONFIG_YAML))
+    rc = compose("up", "-d", "litellm").returncode
+    if rc != 0:
+        return rc
+    out("Waiting for proxy…")
+    if not wait_alive():
+        err("proxy did not come up in 60s — check `./fi logs`")
+        return 1
+    ok(f"proxy live on {base_url()}")
+    info("Master key", load_keys().get("LITELLM_MASTER_KEY", ""))
+    return 0
+
+def cmd_stop(args) -> int:
+    return compose("down").returncode
+
+def cmd_restart(args) -> int:
+    return compose("restart").returncode
+
+def cmd_reload(args) -> int:
+    active = write_config()
+    out(f"Regenerated for {len(active)} providers.")
+    rc = compose("up", "-d", "--force-recreate", "litellm").returncode
+    if rc != 0:
+        return rc
+    if is_alive() or wait_alive():
+        ok("proxy reloaded")
+        return 0
+    err("proxy did not come back up — check `./fi logs`")
+    return 1
+
+def cmd_status(args) -> int:
+    alive = is_alive()
+    info("Proxy", f"{C.G}up{C.R}" if alive else f"{C.RD}down{C.R}")
+    active = write_config()
+    if active:
+        info("Active providers", ", ".join(p["name"] for p in active))
+    print(compose("ps", capture=True).stdout)
+    return 0
+
+def cmd_logs(args) -> int:
+    extra = ["-f"] if args.follow else []
+    return compose("logs", *extra, "litellm").returncode
+
+def cmd_keys_add(args) -> int:
+    p = find_provider(args.provider)
+    name = add_key(p["key_env"], args.key)
+    ok(f"stored as {name}")
+    out("Run `./fi reload` to pick up the new key.")
+    return 0
+
+def cmd_keys_list(args) -> int:
+    grouped = grouped_keys()
+    if not grouped:
+        out("No keys configured. Use `./fi keys add <provider> <key>`.")
+        return 0
+    raw = load_keys()
+    print(f"{'Provider':<18} {'Variable':<28} Value")
+    print("-" * 64)
+    for base in sorted(grouped):
+        if base == "LITELLM_MASTER_KEY":
+            continue
+        for var in grouped[base]:
+            print(f"{base:<18} {var:<28} {mask(raw.get(var, ''))}")
+    return 0
+
+def cmd_keys_remove(args) -> int:
+    p = find_provider(args.provider)
+    removed = remove_key(p["key_env"], index=args.index)
+    if not removed:
+        err("nothing removed")
+        return 1
+    ok(f"removed: {', '.join(removed)}")
+    return 0
+
+def cmd_providers(args) -> int:
+    catalog = load_catalog()
+    grouped = grouped_keys()
+    print(f"{'Provider':<16} {'Status':<18} {'Keys':<5} Models")
+    print("-" * 50)
+    for p in catalog:
+        keys = grouped.get(p["key_env"], [])
+        if keys:
+            status = f"{C.G}active{C.R}"
+        elif p.get("optional_key"):
+            status = f"{C.Y}keyless{C.R}"
+        else:
+            status = f"{C.D}inactive{C.R}"
+        print(f"{p['name']:<16} {status:<28} {len(keys):<5} {len(p.get('model', []))}")
+    return 0
+
+def cmd_models(args) -> int:
+    catalog = load_catalog()
+    grouped = grouped_keys()
+    print(f"{'Alias':<35} {'Provider':<14} Groups")
+    print("-" * 70)
+    for p in catalog:
+        if not (grouped.get(p["key_env"]) or p.get("optional_key")):
+            continue
+        for m in p.get("model", []):
+            if args.group and args.group not in m.get("groups", []):
+                continue
+            print(f"{m['alias']:<35} {p['name']:<14} {','.join(m.get('groups', []))}")
+    return 0
+
+def cmd_config_show(args) -> int:
+    if not CONFIG_YAML.exists():
+        out("No config yet — run `./fi start` first.")
+        return 0
+    out(CONFIG_YAML.read_text())
+    return 0
+
+def cmd_config_path(args) -> int:
+    info("home", str(HOME))
+    info("keys.env", str(KEYS_ENV))
+    info("config.yaml", str(CONFIG_YAML))
+    info("providers", str(PROVIDERS_TOML))
+    info("compose", str(COMPOSE_FILE))
+    return 0
+
+def cmd_test(args) -> int:
+    master = load_keys().get("LITELLM_MASTER_KEY")
+    if not master:
+        err("master key missing — run `./fi start` first")
+        return 1
+    try:
+        body = post(
+            "/v1/chat/completions",
+            {
+                "model": args.model,
+                "messages": [{"role": "user", "content": args.prompt}],
+                "max_tokens": 64,
+            },
+            {"Authorization": f"Bearer {master}"},
+        )
+        print(body["choices"][0]["message"]["content"])
+        return 0
+    except urllib.error.HTTPError as e:
+        err(f"{e.code} {e.reason}: {e.read().decode()}")
+        return 1
+    except Exception as e:
+        err(f"failed: {e}")
+        return 1
+
+def cmd_sync(args) -> int:
+    grouped = grouped_keys()
+    catalog = load_catalog(refresh_discovery=True)
+    any_dynamic = False
+    for prov in catalog:
+        if not prov.get("discovery"):
+            continue
+        any_dynamic = True
+        has_key = bool(grouped.get(prov["key_env"]) or prov.get("optional_key"))
+        if not has_key:
+            print(f"{C.D}∅ {prov['name']}: skipped (no key — `./fi keys add {prov['name']} <key>`){C.R}")
+            continue
+        ok(f"{prov['name']}: {len(prov.get('model', []))} models cached")
+    if not any_dynamic:
+        out("No discoverable providers configured.")
+    return 0
+
+def cmd_test_anthropic(args) -> int:
+    master = load_keys().get("LITELLM_MASTER_KEY")
+    if not master:
+        err("master key missing — run `./fi start` first")
+        return 1
+    try:
+        body = post(
+            "/v1/messages",
+            {
+                "model": args.model,
+                "max_tokens": 64,
+                "messages": [{"role": "user", "content": args.prompt}],
+            },
+            {"x-api-key": master, "anthropic-version": "2023-06-01"},
+        )
+        text = "".join(b.get("text", "") for b in body.get("content", []) if b.get("type") == "text")
+        print(text)
+        return 0
+    except urllib.error.HTTPError as e:
+        err(f"{e.code} {e.reason}: {e.read().decode()}")
+        return 1
+    except Exception as e:
+        err(f"failed: {e}")
+        return 1
+
+
+# --- argparse wiring ------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="fi", description="Free-inference gateway CLI")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("start", help="Generate config and start the proxy").set_defaults(fn=cmd_start)
+    sub.add_parser("stop", help="Stop the proxy").set_defaults(fn=cmd_stop)
+    sub.add_parser("restart", help="Restart without regenerating config").set_defaults(fn=cmd_restart)
+    sub.add_parser("reload", help="Regenerate config and bounce proxy").set_defaults(fn=cmd_reload)
+    sub.add_parser("status", help="Show proxy + provider status").set_defaults(fn=cmd_status)
+
+    pl = sub.add_parser("logs", help="Tail litellm logs")
+    pl.add_argument("--follow", "-f", action="store_true")
+    pl.set_defaults(fn=cmd_logs)
+
+    pk = sub.add_parser("keys", help="Manage API keys")
+    ks = pk.add_subparsers(dest="keys_cmd", required=True)
+    pa = ks.add_parser("add", help="Add a key for a provider")
+    pa.add_argument("provider"); pa.add_argument("key")
+    pa.set_defaults(fn=cmd_keys_add)
+    ks.add_parser("list", help="List configured keys (masked)").set_defaults(fn=cmd_keys_list)
+    pr = ks.add_parser("remove", help="Remove a key")
+    pr.add_argument("provider"); pr.add_argument("--index", type=int, default=None)
+    pr.set_defaults(fn=cmd_keys_remove)
+
+    sub.add_parser("providers", help="Show enabled vs available providers").set_defaults(fn=cmd_providers)
+    sub.add_parser("sync", help="Refresh dynamically-discovered model lists (e.g. OpenRouter)").set_defaults(fn=cmd_sync)
+    pm = sub.add_parser("models", help="List model aliases")
+    pm.add_argument("--group", "-g", default=None)
+    pm.set_defaults(fn=cmd_models)
+
+    pc = sub.add_parser("config", help="Inspect generated config")
+    cs = pc.add_subparsers(dest="config_cmd", required=True)
+    cs.add_parser("show").set_defaults(fn=cmd_config_show)
+    cs.add_parser("path").set_defaults(fn=cmd_config_path)
+
+    pt = sub.add_parser("test", help="OpenAI-shape smoke test")
+    pt.add_argument("model"); pt.add_argument("--prompt", default="Reply with the word READY.")
+    pt.set_defaults(fn=cmd_test)
+
+    pan = sub.add_parser("test-anthropic", help="Anthropic-shape /v1/messages smoke test")
+    pan.add_argument("model"); pan.add_argument("--prompt", default="Reply with the word READY.")
+    pan.set_defaults(fn=cmd_test_anthropic)
+
+    return p
+
+
+if __name__ == "__main__":
+    args = build_parser().parse_args()
+    sys.exit(args.fn(args))
