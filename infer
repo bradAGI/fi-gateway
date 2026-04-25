@@ -1176,12 +1176,17 @@ def cmd_probe(args) -> int:
     if not is_alive():
         err("proxy is down — run `./infer start` first")
         return 1
-    # --include-broken: regenerate config with probe-failed aliases re-added
-    # and force-reload the container so we can actually test them. Without
-    # this, previously-broken aliases 400 because they've been filtered out
-    # of model_list by earlier renders.
-    if args.include_broken:
-        out(f"{C.D}re-rendering config with all aliases included (--include-broken)…{C.R}")
+    # If the probe cache has any excluded (broken) aliases, the running
+    # config has filtered them out of model_list — meaning probe would 400
+    # on the very models we want to retest. Regenerate the config including
+    # everything so probe sees the full catalog. Skip the reload if the
+    # current config is already all-inclusive (no probe cache or no
+    # excluded entries → nothing to add back).
+    cached = load_probe_cache(ignore_ttl=True) or {}
+    has_excluded = any(not v.get("ok") for v in cached.values())
+    if has_excluded or args.include_broken:
+        reason = "auto: prior probe marked some aliases broken" if has_excluded else "--include-broken"
+        out(f"{C.D}re-rendering config with all aliases included ({reason})…{C.R}")
         write_config(include_broken=True)
         rc = compose("up", "-d", "--force-recreate", "litellm").returncode
         if rc != 0:
@@ -1249,8 +1254,8 @@ def cmd_probe(args) -> int:
     save_probe_cache(results)
     out("")
     ok(f"{okc} working, {C.RD}{failc} broken{C.R} — results cached 24h at {PROBE_CACHE}")
-    if args.include_broken:
-        out(f"{C.Y}config currently includes all aliases — run `./infer reload` to re-apply the exclude-broken filter.{C.R}")
+    if has_excluded or args.include_broken:
+        out(f"{C.Y}Config currently exposes all aliases — run `./infer reload` to re-apply the auto-exclude filter using these results.{C.R}")
     out(f"Filter to working models: {C.B}./infer models --working{C.R}")
     return 0
 
@@ -1635,7 +1640,7 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--concurrency", "-c", type=int, default=8, help="Parallel probes (default 8)")
     pp.add_argument("--timeout", "-t", type=int, default=20, help="Per-probe timeout seconds (default 20)")
     pp.add_argument("--include-broken", action="store_true",
-                    help="Temporarily re-render config without the exclude-broken filter so previously-failed aliases can be retested. Run `./infer reload` after to re-apply the filter.")
+                    help="(Now auto-detected when the probe cache has excluded aliases. Pass explicitly to force a config rebuild even when the cache is fresh.)")
     pp.set_defaults(fn=cmd_probe)
 
     pc = sub.add_parser("config", help="Inspect generated config")
