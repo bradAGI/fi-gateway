@@ -140,6 +140,38 @@ def _run_discovery(kind: str, refresh: bool = False) -> list[dict]:
     return handler(refresh=refresh)
 
 
+# Name patterns that are NEVER chat-completion endpoints across providers.
+# Apply at discovery time to all upstreams so the catalog stays clean and
+# the probe doesn't waste time on guaranteed 400s.
+_NON_CHAT_NAME_FRAGMENTS = (
+    # Image generation
+    "/imagen", "imagen-", "/dalle", "dall-e", "stable-diffusion", "/flux",
+    "/seedream", "/seedance", "nano-banana",
+    # Video generation
+    "/veo", "veo-", "lyria", "synthetic-video-detector",
+    # Audio / TTS / STT
+    "whisper", "/tts", "-tts-", "speech-to-text", "text-to-speech",
+    "voxtral", "audio-model",
+    # Embeddings (have own endpoint)
+    "/embed-", "-embed-v", "embedding-", "/embeddings/",
+    "embed-multilingual", "bge-",
+    "embedqa", "embedcode", "nv-embed", "-embedqa", "-embedcode",
+    # Rerankers (have own endpoint)
+    "rerank-", "-rerank", "/rerank/",
+    # Document parsers / specialty (use different request shapes)
+    "nemoretriever", "/nemotron-parse", "-parse-",
+    # Deprecated / known-broken
+    "/vila",
+)
+
+
+def _is_chat_capable(name: str) -> bool:
+    """Reject names that match any known non-chat fragment. Conservative —
+    when in doubt, include and let probe catch it."""
+    n = name.lower()
+    return not any(frag in n for frag in _NON_CHAT_NAME_FRAGMENTS)
+
+
 # Model-id patterns that are NOT text-generation on Google AI Studio.
 # These endpoints use /v1/images, /v1/embeddings, /v1/audio etc., so they
 # 400 or 404 if probed via /v1/chat/completions.
@@ -227,7 +259,7 @@ def _fetch_nvidia_models(refresh: bool = False) -> list[dict]:
     out = []
     for m in data.get("data", []):
         mid = m.get("id", "")
-        if not mid:
+        if not mid or not _is_chat_capable(mid):
             continue
         out.append({
             "alias": mid,
@@ -390,9 +422,18 @@ def _fetch_openrouter_free_models(refresh: bool = False) -> list[dict]:
         pricing = m.get("pricing") or {}
         if not _is_free_pricing(pricing):
             continue
+        mid = m.get("id") or ""
+        if not _is_chat_capable(mid):
+            continue
+        # OpenRouter exposes architecture.output_modalities; require text
+        # output (drops image/video/audio generation models cleanly).
+        arch = m.get("architecture") or {}
+        out_modalities = arch.get("output_modalities")
+        if isinstance(out_modalities, list) and out_modalities and "text" not in out_modalities:
+            continue
         free.append({
-            "alias": m["id"],
-            "upstream": m["id"],
+            "alias": mid,
+            "upstream": mid,
             "groups": _infer_or_groups(m),
         })
     _save_discovery_cache("openrouter_free", free)
@@ -679,6 +720,112 @@ def cmd_status(args) -> int:
     if active:
         info("Active providers", ", ".join(p["name"] for p in active))
     print(compose("ps", capture=True).stdout)
+    return 0
+
+
+def _fmt_age(ts: float) -> str:
+    delta = max(0, int(time.time() - ts))
+    if delta < 60: return f"{delta}s ago"
+    if delta < 3600: return f"{delta // 60}m ago"
+    if delta < 86400: return f"{delta // 3600}h {(delta % 3600) // 60}m ago"
+    return f"{delta // 86400}d {(delta % 86400) // 3600}h ago"
+
+
+def cmd_doctor(args) -> int:
+    """One-shot health overview — proxy state, providers, keys, discovery,
+    probe, drift, wired clients."""
+
+    # --- gateway / proxy ----------------------------------------------------
+    alive = is_alive()
+    print(f"{C.B}GATEWAY{C.R}")
+    print(f"  proxy: {C.G}up at http://localhost:{PORT}{C.R}" if alive
+          else f"  proxy: {C.RD}down{C.R} — run `./fi start`")
+    master = load_keys().get("LITELLM_MASTER_KEY")
+    if master:
+        print(f"  master key: {mask(master)}")
+    if CONFIG_YAML.exists():
+        print(f"  config.yaml: regenerated {_fmt_age(CONFIG_YAML.stat().st_mtime)}")
+    else:
+        print(f"  config.yaml: {C.RD}missing{C.R}")
+
+    # --- providers + keys ---------------------------------------------------
+    catalog = load_catalog()
+    grouped = grouped_keys()
+    active = [p for p in catalog if grouped.get(p["key_env"]) or p.get("optional_key")]
+    inactive = [p for p in catalog if p not in active]
+    print(f"\n{C.B}PROVIDERS{C.R}  ({C.G}{len(active)} active{C.R}, {C.D}{len(inactive)} inactive{C.R})")
+    if active:
+        for p in active:
+            keys = grouped.get(p["key_env"], [])
+            label = f"{len(keys)} keys" if keys else f"{C.Y}keyless{C.R}"
+            print(f"  {C.G}✓{C.R} {p['name']:<14} {label:<22} {len(p.get('model', []))} models")
+
+    # --- discovery cache ----------------------------------------------------
+    print(f"\n{C.B}DISCOVERY CACHE{C.R}")
+    if DISCOVERY_CACHE.exists():
+        try:
+            disc = json.loads(DISCOVERY_CACHE.read_text())
+        except Exception:
+            disc = {}
+        for kind, entry in disc.items():
+            n = len(entry.get("models", []))
+            age = _fmt_age(entry.get("t", 0))
+            stale = (time.time() - entry.get("t", 0)) > DISCOVERY_TTL
+            mark = f"{C.Y}STALE{C.R}" if stale else f"{C.G}fresh{C.R}"
+            print(f"  {kind:<24} {n:>4} models · {age:<14} {mark}")
+    else:
+        print("  (no discovery cache yet — run `./fi sync`)")
+
+    # --- probe cache --------------------------------------------------------
+    print(f"\n{C.B}PROBE CACHE{C.R}")
+    if PROBE_CACHE.exists():
+        try:
+            probe_data = json.loads(PROBE_CACHE.read_text())
+        except Exception:
+            probe_data = {}
+        results = probe_data.get("results", {})
+        ok_count = sum(1 for v in results.values() if v.get("ok"))
+        fail_count = len(results) - ok_count
+        age = _fmt_age(probe_data.get("t", 0))
+        stale = (time.time() - probe_data.get("t", 0)) > PROBE_TTL
+        mark = f"{C.Y}STALE{C.R}" if stale else f"{C.G}fresh{C.R}"
+        print(f"  {C.G}{ok_count} working{C.R} · {C.RD}{fail_count} broken{C.R} · {len(results)} total · {age} · {mark}")
+        # Drift: aliases in probe cache but no longer in catalog
+        catalog_aliases = {m["alias"] for p in catalog for m in p.get("model", [])}
+        ghosts = [a for a in results if a not in catalog_aliases]
+        if ghosts:
+            print(f"  {C.Y}drift: {len(ghosts)} probe entries no longer in catalog (run `./fi sync` to prune){C.R}")
+    else:
+        print("  (no probe cache yet — run `./fi probe`)")
+
+    # --- exposed model count ------------------------------------------------
+    if alive and master:
+        try:
+            req = urllib.request.Request(
+                f"http://localhost:{PORT}/v1/models",
+                headers={"Authorization": f"Bearer {master}"},
+            )
+            with urllib.request.urlopen(req, timeout=5) as r:
+                exposed = len(json.loads(r.read()).get("data", []))
+            print(f"\n{C.B}EXPOSED{C.R}  {exposed} aliases callable via http://localhost:{PORT}/v1/models")
+        except Exception:
+            pass
+
+    # --- wired clients ------------------------------------------------------
+    print(f"\n{C.B}WIRED CLIENTS{C.R}")
+    targets = _wire_targets()
+    for name, t in targets.items():
+        installed = _tool_installed(t["binary"])
+        if not installed:
+            print(f"  {C.D}∅{C.R} {name:<10} (not installed)")
+            continue
+        cfg = _load_config(t["config"]) if t["config"].exists() else {}
+        wired = t["check"](cfg)
+        if wired:
+            print(f"  {C.G}✓{C.R} {name:<10} wired → {t['config']}")
+        else:
+            print(f"  {C.D}·{C.R} {name:<10} installed but not wired ({C.B}./fi wire {name}{C.R})")
+
     return 0
 
 def cmd_logs(args) -> int:
@@ -1223,6 +1370,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("restart", help="Restart without regenerating config").set_defaults(fn=cmd_restart)
     sub.add_parser("reload", help="Regenerate config and bounce proxy").set_defaults(fn=cmd_reload)
     sub.add_parser("status", help="Show proxy + provider status").set_defaults(fn=cmd_status)
+    sub.add_parser("doctor", help="One-shot health overview: gateway, providers, keys, discovery + probe age, drift, wired clients").set_defaults(fn=cmd_doctor)
 
     pl = sub.add_parser("logs", help="Tail litellm logs")
     pl.add_argument("--follow", "-f", action="store_true")
