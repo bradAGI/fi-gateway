@@ -21,6 +21,7 @@ import time
 import tomllib
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 GATEWAY_DIR = Path(__file__).resolve().parent
@@ -29,6 +30,8 @@ KEYS_ENV = HOME / "keys.env"
 CONFIG_YAML = HOME / "config.yaml"
 DISCOVERY_CACHE = HOME / ".discovery-cache.json"
 DISCOVERY_TTL = 24 * 3600
+PROBE_CACHE = HOME / ".probe-cache.json"
+PROBE_TTL = 24 * 3600
 PROVIDERS_TOML = GATEWAY_DIR / "providers.toml"
 COMPOSE_FILE = GATEWAY_DIR / "docker-compose.yml"
 PORT = int(os.environ.get("FI_PORT", "4000"))
@@ -103,6 +106,24 @@ def _save_discovery_cache(key: str, models: list[dict]) -> None:
             cache = {}
     cache[key] = {"t": time.time(), "models": models}
     DISCOVERY_CACHE.write_text(json.dumps(cache))
+
+
+# --- probe cache (per-alias "does this model actually work") --------------
+
+def load_probe_cache(ignore_ttl: bool = False) -> dict | None:
+    if not PROBE_CACHE.exists():
+        return None
+    try:
+        data = json.loads(PROBE_CACHE.read_text())
+    except Exception:
+        return None
+    if not ignore_ttl and time.time() - data.get("t", 0) > PROBE_TTL:
+        return None
+    return data.get("results", {})
+
+def save_probe_cache(results: dict) -> None:
+    HOME.mkdir(parents=True, exist_ok=True)
+    PROBE_CACHE.write_text(json.dumps({"t": time.time(), "results": results}))
 
 def _run_discovery(kind: str, refresh: bool = False) -> list[dict]:
     handlers = {
@@ -464,9 +485,16 @@ def render_config(catalog: list[dict], grouped: dict[str, list[str]]) -> str:
     lines += [
         "router_settings:",
         "  routing_strategy: usage-based-routing-v2",
-        "  num_retries: 2",
-        "  allowed_fails: 2",
-        "  cooldown_time: 30",
+        "  num_retries: 5",              # was 2 — cycle through more sibling deployments
+        "  allowed_fails: 3",             # was 2 — tolerate a few failures before cooldown
+        "  cooldown_time: 10",            # was 30 — recover faster
+        "  retry_policy:",
+        "    RateLimitErrorRetries: 3",
+        "    TimeoutErrorRetries: 3",
+        "    InternalServerErrorRetries: 3",
+        "    BadRequestErrorRetries: 2",  # covers many provider 4xx incl 404 "not found for account"
+        "    ContentPolicyViolationErrorRetries: 0",
+        "    AuthenticationErrorRetries: 0",
         "general_settings:",
         "  master_key: os.environ/LITELLM_MASTER_KEY",
         "litellm_settings:",
@@ -629,15 +657,30 @@ def cmd_providers(args) -> int:
 def cmd_models(args) -> int:
     catalog = load_catalog()
     grouped = grouped_keys()
-    print(f"{'Alias':<35} {'Provider':<14} Groups")
-    print("-" * 70)
+    probe = load_probe_cache() if (args.working or args.broken) else None
+    if (args.working or args.broken) and probe is None:
+        err("no probe cache (or stale) — run `./fi probe` first")
+        return 1
+    rows = []
     for p in catalog:
         if not (grouped.get(p["key_env"]) or p.get("optional_key")):
             continue
         for m in p.get("model", []):
             if args.group and args.group not in m.get("groups", []):
                 continue
-            print(f"{m['alias']:<35} {p['name']:<14} {','.join(m.get('groups', []))}")
+            if probe is not None:
+                result = probe.get(m["alias"])
+                if args.working and not (result and result.get("ok")):
+                    continue
+                if args.broken and (result is None or result.get("ok")):
+                    continue
+            rows.append((m["alias"], p["name"], ",".join(m.get("groups", []))))
+    width = max((len(a) for a, _, _ in rows), default=35)
+    print(f"{'Alias':<{width}}  {'Provider':<14} Groups")
+    print("-" * (width + 30))
+    for alias, prov, groups in rows:
+        print(f"{alias:<{width}}  {prov:<14} {groups}")
+    print(f"\n{len(rows)} models")
     return 0
 
 def cmd_config_show(args) -> int:
@@ -666,7 +709,7 @@ def cmd_test(args) -> int:
             {
                 "model": args.model,
                 "messages": [{"role": "user", "content": args.prompt}],
-                "max_tokens": 64,
+                "max_tokens": 512,
             },
             {"Authorization": f"Bearer {master}"},
         )
@@ -696,6 +739,112 @@ def cmd_sync(args) -> int:
         out("No discoverable providers configured.")
     return 0
 
+def _probe_one(master: str, alias: str, timeout: int = 20) -> tuple[str, dict]:
+    """Fire one tiny chat.completions at the gateway for `alias`."""
+    body = {
+        "model": alias,
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 256,
+    }
+    req = urllib.request.Request(
+        f"http://localhost:{PORT}/v1/chat/completions",
+        data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {master}", "Content-Type": "application/json"},
+    )
+    start = time.monotonic()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read())
+        latency_ms = int((time.monotonic() - start) * 1000)
+        msg = (data.get("choices") or [{}])[0].get("message") or {}
+        has_content = bool(msg.get("content")) or bool(msg.get("reasoning_content"))
+        usage = data.get("usage") or {}
+        return alias, {
+            "ok": has_content,
+            "latency_ms": latency_ms,
+            "completion_tokens": usage.get("completion_tokens", 0),
+            "note": None if has_content else "empty response (may need higher max_tokens)",
+        }
+    except urllib.error.HTTPError as e:
+        body_text = e.read().decode("utf-8", errors="replace")[:140]
+        # Classify into common buckets so results are actionable
+        if e.code == 429:
+            note = f"429 rate-limited: {body_text[:80]}"
+        elif e.code in (401, 403):
+            note = f"{e.code} auth: {body_text[:80]}"
+        elif e.code == 404:
+            note = f"404 not found / unauthorized: {body_text[:80]}"
+        elif 500 <= e.code < 600:
+            note = f"{e.code} upstream error: {body_text[:60]}"
+        else:
+            note = f"{e.code}: {body_text[:80]}"
+        return alias, {"ok": False, "code": e.code, "note": note}
+    except Exception as e:
+        return alias, {"ok": False, "note": f"{type(e).__name__}: {str(e)[:90]}"}
+
+
+def cmd_probe(args) -> int:
+    master = load_keys().get("LITELLM_MASTER_KEY")
+    if not master:
+        err("master key missing — run `./fi start` first")
+        return 1
+    if not is_alive():
+        err("proxy is down — run `./fi start` first")
+        return 1
+    catalog = load_catalog()
+    grouped = grouped_keys()
+    aliases: list[str] = []
+    seen: set[str] = set()
+    for p in catalog:
+        if not (grouped.get(p["key_env"]) or p.get("optional_key")):
+            continue
+        for m in p.get("model", []):
+            if args.group and args.group not in m.get("groups", []):
+                continue
+            if args.provider and args.provider != p["name"]:
+                continue
+            alias = m["alias"]
+            # Skip group aliases in probe — they're not direct deployments,
+            # they resolve to one of many. Probe exercises leaves, not groups.
+            if alias in ("fast", "smart", "code", "reasoning", "vision", "embed", "rerank", "free", "default", "cheap"):
+                continue
+            if alias in seen:
+                continue
+            seen.add(alias)
+            aliases.append(alias)
+    if args.limit:
+        aliases = aliases[:args.limit]
+    if not aliases:
+        err("no aliases to probe (try --group, --provider, or add keys)")
+        return 1
+    out(f"Probing {len(aliases)} aliases at http://localhost:{PORT} (concurrency={args.concurrency}, timeout={args.timeout}s)…")
+    results: dict[str, dict] = {}
+    # Preserve existing results for aliases we're not re-probing this run.
+    existing = load_probe_cache(ignore_ttl=True) or {}
+    results.update(existing)
+    done = 0
+    okc = failc = 0
+    with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+        futures = {pool.submit(_probe_one, master, a, args.timeout): a for a in aliases}
+        for fut in as_completed(futures):
+            alias, result = fut.result()
+            results[alias] = result
+            done += 1
+            if result.get("ok"):
+                okc += 1
+                mark = f"{C.G}✓{C.R}"
+                detail = f"{result.get('latency_ms', '?')}ms"
+            else:
+                failc += 1
+                mark = f"{C.RD}✗{C.R}"
+                detail = result.get("note", "")
+            print(f"  [{done:>3}/{len(aliases)}] {mark} {alias:<48} {detail}", file=sys.stderr)
+    save_probe_cache(results)
+    out("")
+    ok(f"{okc} working, {C.RD}{failc} broken{C.R} — results cached 24h at {PROBE_CACHE}")
+    out(f"Filter to working models: {C.B}./fi models --working{C.R}")
+    return 0
+
 def cmd_test_anthropic(args) -> int:
     master = load_keys().get("LITELLM_MASTER_KEY")
     if not master:
@@ -706,7 +855,7 @@ def cmd_test_anthropic(args) -> int:
             "/v1/messages",
             {
                 "model": args.model,
-                "max_tokens": 64,
+                "max_tokens": 512,
                 "messages": [{"role": "user", "content": args.prompt}],
             },
             {"x-api-key": master, "anthropic-version": "2023-06-01"},
@@ -964,7 +1113,17 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("sync", help="Refresh dynamically-discovered model lists (e.g. OpenRouter)").set_defaults(fn=cmd_sync)
     pm = sub.add_parser("models", help="List model aliases")
     pm.add_argument("--group", "-g", default=None)
+    pm.add_argument("--working", "-w", action="store_true", help="Only show models that passed `./fi probe`")
+    pm.add_argument("--broken", action="store_true", help="Only show models that failed `./fi probe` (or were never probed)")
     pm.set_defaults(fn=cmd_models)
+
+    pp = sub.add_parser("probe", help="Smoke-test every alias against the proxy; cache which models work (24h)")
+    pp.add_argument("--group", "-g", default=None, help="Only probe models in this group")
+    pp.add_argument("--provider", "-p", default=None, help="Only probe models from this provider")
+    pp.add_argument("--limit", "-n", type=int, default=None, help="Probe at most N aliases")
+    pp.add_argument("--concurrency", "-c", type=int, default=8, help="Parallel probes (default 8)")
+    pp.add_argument("--timeout", "-t", type=int, default=20, help="Per-probe timeout seconds (default 20)")
+    pp.set_defaults(fn=cmd_probe)
 
     pc = sub.add_parser("config", help="Inspect generated config")
     cs = pc.add_subparsers(dest="config_cmd", required=True)
