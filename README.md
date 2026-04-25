@@ -62,6 +62,8 @@ infer doctor               # works from any directory
 
 Detects your shell (bash / zsh / fish on macOS and Linux) and prints the right `~/.zshrc` / `~/.bashrc` / `~/.config/fish/config.fish` line if `~/.local/bin` isn't on `$PATH`. `./infer uninstall` removes the symlink. Pass `--name <other>` to install under a different command name.
 
+> **Permission denied?** If `./infer` errors with "Permission denied" right after clone or skill install, the executable bit didn't survive the transfer (some `npx`/`tar` pipelines strip it). Run `chmod +x infer` once and you're set.
+
 That's it — your wired agent now routes through `localhost:4000` using your free keys. Every wired tool gets a clean `/v1/models` list of probe-verified callable aliases.
 
 > **Custom port?** Export `INFER_PORT=8080` (or any free port) before any `./infer` invocation and the gateway, doctor output, wire URLs, and probe all use it. Container-internal port is always 4000; only the host-side mapping changes.
