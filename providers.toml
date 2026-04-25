@@ -14,34 +14,11 @@
 name = "gemini"
 key_env = "GEMINI_API_KEY"
 litellm_prefix = "gemini"
-
-[[provider.model]]
-alias = "gemini-2.5-pro"
-upstream = "gemini-2.5-pro"
-rpm = 1000
-tpm = 5_000_000
-groups = ["smart", "vision"]
-
-[[provider.model]]
-alias = "gemini-2.5-flash"
-upstream = "gemini-2.5-flash"
-rpm = 2000
-tpm = 3_000_000
-groups = ["fast", "vision", "default"]
-
-[[provider.model]]
-alias = "gemini-2.5-flash-lite"
-upstream = "gemini-2.5-flash-lite"
-rpm = 10000
-tpm = 10_000_000
-groups = ["fast", "cheap"]
-
-[[provider.model]]
-alias = "gemini-embedding-2"
-upstream = "gemini-embedding-2"
-rpm = 5000
-tpm = 5_000_000
-groups = ["embed"]
+discovery = "gemini"
+# Auto-discovered from generativelanguage.googleapis.com/v1beta/openai/models.
+# Filters out image / video / audio / embedding / specialty endpoints that
+# don't go through /v1/chat/completions. ~24 chat-capable models (Gemini
+# 2.0/2.5/3/3.1 variants + Gemma 3/4 lineup) land in the catalog.
 
 # ---
 

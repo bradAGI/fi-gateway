@@ -14,8 +14,8 @@ Trigger phrases:
 - "add my **<provider>** key" / "store my **<provider>** key" / "I got a **<provider>** key"
 - "start / boot / spin up the **proxy** / **gateway** / fi"
 - "what free **models** do I have" / "list my models" / "models I can use"
-- "test **<model-or-group>**" / "smoke test" / "ping fast"
-- "switch to the **smart** group" / "use **code** group"
+- "test **<model>**" / "smoke test" / "ping gemini-2.5-flash"
+- "show me **smart** / **code** / **vision** models" (filter by tag)
 - "add provider **<x>**" / "add **<x>** to the catalog"
 - "refresh / re-sync **OpenRouter** / NVIDIA / HF / models"
 - "why is **<model>** failing" / "proxy isn't working" / "check the logs"
@@ -70,20 +70,19 @@ Drive the CLI directly with `./fi`:
 
 The first `./fi start` prints a generated **master key** (`sk-fi-…`). That's what clients use, not the underlying provider keys.
 
-## Groups
+## Capability tags
 
-Models share group aliases so callers don't pin a specific deployment:
+Each model in `providers.toml` carries capability tags (`groups = [...]`). These are **filter metadata, not callable model IDs**. Use them to browse the catalog:
 
-| Group | Picks |
-|-------|-------|
-| `fast` | Low-latency small models (Gemini Flash, Llama 3.1 8B, Nemo, …) |
-| `smart` | Flagship large models (Llama 3.3 70B, DeepSeek V3, Gemini 2.5 Pro, …) |
-| `code` | Coder-tuned models (Codestral, Qwen3 Coder, DeepSeek Coder) |
-| `reasoning` | Reasoning/thinking models (R1, QwQ, o-series, Magistral) |
-| `vision` | Multimodal text+image |
-| `embed` | Embedding models |
-| `rerank` | Rerankers |
-| `free` | Models with at least one truly zero-priced provider |
+```bash
+./fi models -g smart       # show models tagged "smart"
+./fi models -g code        # coder-tuned models
+./fi models --working -g vision   # working vision-capable models
+```
+
+Known tags: `fast`, `smart`, `code`, `reasoning`, `vision`, `embed`, `rerank`, `free`.
+
+**Always call a concrete alias** in a request (`gemini-2.5-flash`, `meta/llama-3.3-70b-instruct`, `qwen/qwen3-coder-480b-a35b-instruct`). The gateway does not expose `fast`/`smart`/etc. as callable model names — routing stays deterministic and logs are meaningful.
 
 ## Catalog schema — `providers.toml`
 
@@ -129,8 +128,8 @@ Results cache 24h at `~/.config/free-inference/.discovery-cache.json`. Users can
 | Tool  | Binary    | Config file                                        | What gets written |
 |-------|-----------|----------------------------------------------------|-------------------|
 | `cc`  | `claude`  | `~/.claude/settings.json`                          | `env.ANTHROPIC_BASE_URL=http://localhost:4000` + master key. Settings chmod 600. |
-| `opencode` | `opencode` | `~/.config/opencode/opencode.json`          | `provider.fi` block with `@ai-sdk/openai-compatible`, localhost:4000/v1, master key, five group models (`fast`, `smart`, `code`, `reasoning`, `vision`). |
-| `pi`  | `pi`      | `~/.pi/agent/models.json`                          | `providers.fi` with `api: openai-completions`, localhost:4000/v1, same five group models. |
+| `opencode` | `opencode` | `~/.config/opencode/opencode.json`          | `provider.fi` block with `@ai-sdk/openai-compatible`, localhost:4000/v1, master key, and a curated default model list (Gemini Flash, Llama 3.3 70B, DeepSeek V3.2, Qwen3 Coder 480B, OpenRouter free router, LLM7 GPT-OSS). Edit the config to add more. |
+| `pi`  | `pi`      | `~/.pi/agent/models.json`                          | `providers.fi` with `api: openai-completions`, localhost:4000/v1, same curated default model list. |
 
 Trigger phrases: "wire Claude Code to fi", "point my CLI at fi", "set up fi for opencode", "detect my coding agents", "undo the fi wiring".
 
@@ -143,7 +142,7 @@ After wiring, tell the user to run `./fi start` if the proxy isn't up yet — th
 1. Ask which providers they have keys for. Common easy wins: Gemini (generous free tier), OpenRouter (aggregates many free models), Groq (fastest), NVIDIA NIM (135 models on free credits).
 2. For each: `./fi keys add <provider> <key>`.
 3. `./fi start` — note the printed master key.
-4. `./fi test fast` — verify routing works end-to-end.
+4. `./fi test gemini-2.5-flash` (or any concrete alias from `./fi models`) — verify routing works end-to-end.
 5. Show the OpenAI/Anthropic SDK snippet so they can point their client at `http://localhost:4000`.
 
 ### Adding a provider not in the catalog
@@ -191,13 +190,12 @@ Claude should:
 4. Report the `sk-fi-…` master key + the OpenAI SDK snippet.
 
 **Ask Claude to debug:**
-> "why is `./fi test smart` returning 404?"
+> "why is `./fi test meta/function-xyz-v2` returning 404?"
 
 Claude should:
 1. `./fi logs | tail -40` to find the failing upstream.
-2. `./fi models -g smart` to see which deployments are in that group.
-3. If an NVIDIA model, check whether the user's account has access to that specific NVIDIA function ID.
-4. Suggest narrowing the `smart` group to known-working deployments, or using a specific alias.
+2. If an NVIDIA alias, check whether the user's account has access to that specific NVIDIA function ID — many need per-account approval and will always 404.
+3. Suggest `./fi probe && ./fi models --working` to narrow to aliases that actually respond for this account.
 
 **Ask Claude to add a new provider:**
 > "add SambaNova — key is samba_… and they have Llama 3.3 70B"

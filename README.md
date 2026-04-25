@@ -71,8 +71,8 @@ claude> [runs ./fi models — shows your 300+ aliases across providers]
 you> add nvidia too — nvapi-…
 claude> [stores key, runs ./fi sync, discovers 135 NVIDIA models, ./fi reload]
 
-you> why is the smart group 404'ing?
-claude> [checks ./fi logs, diagnoses upstream access issue]
+you> run `./fi probe` and show me which models actually work
+claude> [probes all aliases, filters to working set, shows them by provider]
 ```
 
 ## What you get
@@ -81,7 +81,7 @@ claude> [checks ./fi logs, diagnoses upstream access issue]
 - **~150 models out of the box** — Gemini, Groq, OpenRouter (free-priced only), NVIDIA NIM, Cerebras, Mistral, Scaleway, Voyage, Jina, Pollinations, Cohere, Together, Hunyuan, Chutes, LLM7, Ollama Cloud.
 - **Auto-discovery** — OpenRouter, NVIDIA NIM, Pollinations catalogs refresh from live APIs (24h cache); no static lists to maintain.
 - **Rate-limit-aware routing** — respects each provider's RPM/TPM, cools down on 429s, round-robins across multiple keys per provider.
-- **Group aliases** — `fast`, `smart`, `vision`, `embed`, `rerank`, `code`, `reasoning` pick the cheapest under-quota deployment and fail over on 429/5xx.
+- **Capability tags** — `fast`, `smart`, `vision`, `embed`, `rerank`, `code`, `reasoning` are filter tags on each model. Use `./fi models -g smart` to browse; always call a concrete alias (`gemini-2.5-flash`, `meta/llama-3.3-70b-instruct`, …) in your request — group names are *not* callable, so routing stays deterministic.
 
 ## Requirements
 
@@ -98,7 +98,7 @@ Once `./fi start` is running, any OpenAI or Anthropic SDK points at the same URL
 from openai import OpenAI
 client = OpenAI(base_url="http://localhost:4000/v1", api_key="sk-fi-…")
 client.chat.completions.create(
-    model="fast",                  # or "gemini-2.5-flash", "smart", "code", "embed", …
+    model="gemini-2.5-flash",       # any concrete alias from `./fi models --working`
     messages=[{"role": "user", "content": "Hello"}],
 )
 

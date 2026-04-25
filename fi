@@ -131,12 +131,77 @@ def _run_discovery(kind: str, refresh: bool = False) -> list[dict]:
         "nvidia_nim": _fetch_nvidia_models,
         "huggingface_inference": _fetch_huggingface_models,
         "pollinations": _fetch_pollinations_models,
+        "gemini": _fetch_gemini_models,
     }
     handler = handlers.get(kind)
     if not handler:
         err(f"unknown discovery kind: {kind}")
         return []
     return handler(refresh=refresh)
+
+
+# Model-id patterns that are NOT text-generation on Google AI Studio.
+# These endpoints use /v1/images, /v1/embeddings, /v1/audio etc., so they
+# 400 or 404 if probed via /v1/chat/completions.
+_GEMINI_NON_CHAT_PATTERNS = (
+    "-image", "-tts", "-audio", "-live-", "-video", "-robotics",
+    "imagen", "veo", "lyria", "nano-banana", "computer-use",
+    "embedding", "aqa", "deep-research",
+)
+
+
+def _fetch_gemini_models(refresh: bool = False) -> list[dict]:
+    if not refresh:
+        cached = _load_discovery_cache("gemini")
+        if cached is not None:
+            return cached
+    keys_for = grouped_keys().get("GEMINI_API_KEY", [])
+    if not keys_for:
+        return []
+    token = load_keys()[keys_for[0]]
+    print(f"{C.D}discovering gemini / ai-studio models…{C.R}", file=sys.stderr)
+    try:
+        req = urllib.request.Request(
+            "https://generativelanguage.googleapis.com/v1beta/openai/models",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = json.loads(r.read())
+    except Exception as e:
+        err(f"gemini discovery failed: {e}")
+        return _load_discovery_cache("gemini", ignore_ttl=True) or []
+    models_out: list[dict] = []
+    for m in data.get("data", []):
+        raw_id = m.get("id") or ""
+        # API returns ids like "models/gemini-2.5-flash" — strip prefix
+        mid = raw_id.split("/", 1)[-1] if raw_id.startswith("models/") else raw_id
+        if not mid:
+            continue
+        lower = mid.lower()
+        if any(pat in lower for pat in _GEMINI_NON_CHAT_PATTERNS):
+            continue
+        models_out.append({
+            "alias": mid,
+            "upstream": mid,
+            "groups": _infer_gemini_groups(mid),
+        })
+    _save_discovery_cache("gemini", models_out)
+    return models_out
+
+
+def _infer_gemini_groups(mid: str) -> list[str]:
+    tags = ["gemini", "free"]
+    n = mid.lower()
+    # All modern Gemini + Gemma 3/4 accept image inputs
+    if n.startswith("gemini-") or any(s in n for s in ("gemma-3", "gemma-4", "gemma-3n")):
+        tags.append("vision")
+    if any(s in n for s in ("pro", "3-flash", "3.1-flash", "latest")) and "lite" not in n:
+        tags.append("smart")
+    if any(s in n for s in ("flash-lite", "flash-lite-latest", "nano", "1b", "2b", "3n-e2b", "3n-e4b")):
+        tags.append("fast")
+    if "flash" in n and "lite" not in n and "preview" not in n:
+        tags.append("fast")
+    return tags
 
 
 def _fetch_nvidia_models(refresh: bool = False) -> list[dict]:
@@ -435,9 +500,15 @@ def _yaml_str(s: str) -> str:
     return s
 
 def render_config(catalog: list[dict], grouped: dict[str, list[str]]) -> str:
-    """Render LiteLLM config.yaml. Hand-written to avoid PyYAML."""
+    """Render LiteLLM config.yaml. Hand-written to avoid PyYAML.
+
+    Each model_list entry is a concrete (alias, deployment) pair. We do NOT
+    emit group names (fast/smart/etc.) as callable model_name entries —
+    those caused opaque routing surprises (random deployment picked, then
+    account-level 404s). Group tags remain as filter metadata on the model
+    via providers.toml; callers must name a specific alias.
+    """
     lines = ["model_list:"]
-    group_to_model: dict[str, list[tuple[dict, dict, str | None]]] = {}
 
     for prov in catalog:
         key_vars = grouped.get(prov["key_env"], [])
@@ -463,24 +534,6 @@ def render_config(catalog: list[dict], grouped: dict[str, list[str]]) -> str:
                     lines.append(f"      rpm: {model['rpm']}")
                 if model.get("tpm"):
                     lines.append(f"      tpm: {model['tpm']}")
-            for group in model.get("groups", []):
-                group_to_model.setdefault(group, []).append((prov, model, effective[0]))
-
-    for group, members in group_to_model.items():
-        seen: set[str] = set()
-        for prov, model, key_var in members:
-            if model["alias"] in seen:
-                continue
-            seen.add(model["alias"])
-            lines.append(f"  - model_name: {group}")
-            lines.append("    litellm_params:")
-            lines.append(f"      model: {_yaml_str(prov['litellm_prefix'] + '/' + model['upstream'])}")
-            if key_var:
-                lines.append(f"      api_key: os.environ/{key_var}")
-            else:
-                lines.append(f"      api_key: unused")
-            if prov.get("base_url"):
-                lines.append(f"      api_base: {_yaml_str(prov['base_url'])}")
 
     lines += [
         "router_settings:",
@@ -808,6 +861,12 @@ def cmd_probe(args) -> int:
             # they resolve to one of many. Probe exercises leaves, not groups.
             if alias in ("fast", "smart", "code", "reasoning", "vision", "embed", "rerank", "free", "default", "cheap"):
                 continue
+            # Embedding and rerank models don't speak /v1/chat/completions;
+            # they have their own endpoints and will always 400/404 if probed
+            # through chat. Skip them.
+            mgroups = set(m.get("groups", []))
+            if mgroups & {"embed", "rerank"}:
+                continue
             if alias in seen:
                 continue
             seen.add(alias)
@@ -883,7 +942,19 @@ def cmd_test_anthropic(args) -> int:
 FI_OPENAI_URL = "http://localhost:4000/v1"
 FI_ANTHROPIC_URL = "http://localhost:4000"
 FI_PROVIDER_ID = "fi"
-FI_GROUPS = ("fast", "smart", "code", "reasoning", "vision")
+# Concrete aliases exposed to wired coding-agent CLIs. Deliberately a short,
+# diverse list so their /model pickers aren't spammed; users can edit
+# providers.toml or their client config to add more. Picked to cover a mix
+# of providers (Gemini, NVIDIA, OpenRouter free, keyless LLM7).
+FI_WIRE_MODELS = (
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "meta/llama-3.3-70b-instruct",
+    "deepseek-ai/deepseek-v3.2",
+    "qwen/qwen3-coder-480b-a35b-instruct",
+    "openrouter/free",
+    "gpt-oss-llm7",
+)
 
 
 def _wire_pi_check(cfg: dict) -> bool:
@@ -896,11 +967,17 @@ def _wire_pi_patch(cfg: dict, master: str) -> dict:
         "api": "openai-completions",
         "apiKey": master,
         "models": [
-            {"id": g, "name": f"fi/{g}", "reasoning": g == "reasoning",
-             "input": ["text", "image"] if g == "vision" else ["text"],
-             "contextWindow": 128000, "maxTokens": 4096,
-             "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}}
-            for g in FI_GROUPS
+            {
+                "id": mid,
+                "name": f"fi/{mid}",
+                # "vision" in alias is a good proxy; users can edit post-wire
+                "reasoning": "r1" in mid or "reasoning" in mid,
+                "input": ["text", "image"] if any(t in mid.lower() for t in ("gemini", "vision", "-vl-")) else ["text"],
+                "contextWindow": 128000,
+                "maxTokens": 4096,
+                "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+            }
+            for mid in FI_WIRE_MODELS
         ],
     }
     return cfg
@@ -921,7 +998,7 @@ def _wire_opencode_patch(cfg: dict, master: str) -> dict:
         "npm": "@ai-sdk/openai-compatible",
         "name": "fi gateway",
         "options": {"baseURL": FI_OPENAI_URL, "apiKey": master},
-        "models": {g: {"name": f"fi/{g}"} for g in FI_GROUPS},
+        "models": {mid: {"name": f"fi/{mid}"} for mid in FI_WIRE_MODELS},
     }
     return cfg
 
