@@ -134,15 +134,11 @@ discovery = "nvidia_nim"
 
 # ---
 
-[[provider]]
-name = "huggingface"
-key_env = "HF_TOKEN"
-litellm_prefix = "huggingface"
-discovery = "huggingface_inference"
-# Auto-discovered from huggingface.co/api/models filtered to free
-# inference_provider=hf-inference, text-generation only, limit 200.
-# Add manual entries below for paid HF inference providers (Together,
-# Fireworks, etc. via HF routing) if desired.
+# NOTE: Hugging Face routing removed from the default catalog. HF gives
+# free accounts only $0.10/month in inference credits — the budget is
+# exhausted within a handful of calls to any non-trivial model, so
+# including HF-routed models here just produces noisy probe failures
+# and 429s. Re-add manually if you have a PRO subscription ($2/mo credit).
 
 # ---
 

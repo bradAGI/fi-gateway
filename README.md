@@ -40,7 +40,7 @@ The skill installs into your agent's skills directory (`~/.claude/skills/fi-gate
 
 Each `wire` saves the original config to `<path>.fi-backup` before editing, so `./fi unwire` is always safe. For `cc`, the settings file is chmod'd to 600 since it now contains the gateway's master key.
 
-After wiring, your coding agent's normal commands route through the fi gateway at `localhost:4000` instead of the vendor's API — so every request uses *your* free keys (Gemini, NVIDIA, OpenRouter, HF, …) with rate-limit-aware fallbacks.
+After wiring, your coding agent's normal commands route through the fi gateway at `localhost:4000` instead of the vendor's API — so every request uses *your* free keys (Gemini, NVIDIA, OpenRouter, …) with rate-limit-aware fallbacks.
 
 ## 3. Add your free keys and start it
 
@@ -78,8 +78,8 @@ claude> [checks ./fi logs, diagnoses upstream access issue]
 ## What you get
 
 - **One endpoint, two shapes** — `/v1/chat/completions` (OpenAI) *and* `/v1/messages` (Anthropic) from the same master key.
-- **300+ models out of the box** — Gemini, Groq, OpenRouter, NVIDIA NIM, Hugging Face, Cerebras, Mistral, Scaleway, Voyage, Jina, Pollinations, Cohere, Together, Hunyuan, Chutes, LLM7, Ollama Cloud.
-- **Auto-discovery** — OpenRouter, NVIDIA NIM, Hugging Face, Pollinations catalogs refresh from live APIs (24h cache); no static lists to maintain.
+- **~150 models out of the box** — Gemini, Groq, OpenRouter (free-priced only), NVIDIA NIM, Cerebras, Mistral, Scaleway, Voyage, Jina, Pollinations, Cohere, Together, Hunyuan, Chutes, LLM7, Ollama Cloud.
+- **Auto-discovery** — OpenRouter, NVIDIA NIM, Pollinations catalogs refresh from live APIs (24h cache); no static lists to maintain.
 - **Rate-limit-aware routing** — respects each provider's RPM/TPM, cools down on 429s, round-robins across multiple keys per provider.
 - **Group aliases** — `fast`, `smart`, `vision`, `embed`, `rerank`, `code`, `reasoning` pick the cheapest under-quota deployment and fail over on 429/5xx.
 
@@ -168,7 +168,8 @@ User data lives in `~/.config/free-inference/` (never synced to the skill repo):
 |------|--------|--------|
 | `openrouter_free` | `openrouter.ai/api/v1/models` (filtered to `pricing.prompt == 0`) | 24h |
 | `nvidia_nim` | `integrate.api.nvidia.com/v1/models` (auth required) | 24h |
-| `huggingface_inference` | `router.huggingface.co/v1/models` (live providers, $0.10/mo free credits) | 24h |
+<!-- HuggingFace routing removed: $0.10/mo free HF credit is exhausted within a few calls on non-PRO accounts. -->
+
 | `pollinations` | `gen.pollinations.ai/v1/models` (keyless) | 24h |
 
 Discovery is skipped for providers without a configured key (except `optional_key` providers like Pollinations). Run `./fi sync` to force a refresh.
@@ -199,7 +200,7 @@ No code change needed — the catalog is data.
 - `/v1/messages` drops `cache_control` blocks for non-Anthropic upstreams (free providers don't have prompt caching).
 - Streaming event order for tool-call edge cases may differ subtly from native Anthropic; standard streaming works fine.
 - Some providers need a specific `litellm_prefix` for Anthropic-shape translation — `openai` routes `/v1/messages` through OpenAI's Responses API which most providers don't expose. Use the dedicated prefix (`nvidia_nim`, `cohere`, `gemini`) when available.
-- Hugging Face models are "credit-gated free" — callable with HF's $0.10/mo free credit, not zero-cost per call. Filter with `./fi models -g free` to see models with at least one zero-priced provider.
+- Use `./fi probe && ./fi models --working` to filter to aliases that actually respond with content for your account — NVIDIA NIM in particular exposes many endpoints that require separate per-account approval (silent 404 "Function not found") and OpenRouter free-pool rates can be tight.
 
 ## License
 
