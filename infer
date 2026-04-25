@@ -660,16 +660,30 @@ def render_config(catalog: list[dict], grouped: dict[str, list[str]],
     ]
     return "\n".join(lines)
 
-def write_config(include_broken: bool = False) -> list[dict]:
+def write_config(include_broken: bool = False, verbose: bool = False) -> list[dict]:
+    """Regenerate config.yaml. Returns the active-provider list.
+    `verbose=True` (used by start / reload / probe) prints the
+    'Excluded N probe-failed' breadcrumb. Read-only callers
+    (status / doctor) should use `active_providers()` instead."""
     ensure_master_key()
     catalog = load_catalog()
     grouped = grouped_keys()
     HOME.mkdir(parents=True, exist_ok=True)
     rendered = render_config(catalog, grouped, include_broken=include_broken)
     CONFIG_YAML.write_text(rendered)
-    first = rendered.splitlines()[0] if rendered else ""
-    if first.startswith("# Excluded "):
-        print(f"{C.D}{first[2:]}{C.R}", file=sys.stderr)
+    if verbose:
+        first = rendered.splitlines()[0] if rendered else ""
+        if first.startswith("# Excluded "):
+            print(f"{C.D}{first[2:]}{C.R}", file=sys.stderr)
+    return [p for p in catalog if grouped.get(p["key_env"]) or p.get("optional_key")]
+
+
+def active_providers() -> list[dict]:
+    """Compute the active provider list without writing the config —
+    used by read-only commands (status, doctor) so they don't churn
+    the file or print the regeneration breadcrumb on every invocation."""
+    catalog = load_catalog()
+    grouped = grouped_keys()
     return [p for p in catalog if grouped.get(p["key_env"]) or p.get("optional_key")]
 
 
@@ -717,7 +731,7 @@ def post(path: str, body: dict, headers: dict, timeout: float = 60.0) -> dict:
 # --- commands -------------------------------------------------------------
 
 def cmd_start(args) -> int:
-    active = write_config()
+    active = write_config(verbose=True)
     if not active:
         err("No providers active — add a key first: ./infer keys add <provider> <key>")
         return 1
@@ -741,7 +755,7 @@ def cmd_restart(args) -> int:
     return compose("restart").returncode
 
 def cmd_reload(args) -> int:
-    active = write_config()
+    active = write_config(verbose=True)
     out(f"Regenerated for {len(active)} providers.")
     rc = compose("up", "-d", "--force-recreate", "litellm").returncode
     if rc != 0:
@@ -755,7 +769,7 @@ def cmd_reload(args) -> int:
 def cmd_status(args) -> int:
     alive = is_alive()
     info("Proxy", f"{C.G}up{C.R}" if alive else f"{C.RD}down{C.R}")
-    active = write_config()
+    active = active_providers()
     if active:
         info("Active providers", ", ".join(p["name"] for p in active))
     print(compose("ps", capture=True).stdout)
