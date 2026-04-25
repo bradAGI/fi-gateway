@@ -25,7 +25,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 GATEWAY_DIR = Path(__file__).resolve().parent
-HOME = Path(os.environ.get("FI_HOME") or Path.home() / ".config" / "free-inference").expanduser()
+HOME = Path(os.environ.get("INFER_HOME") or Path.home() / ".config" / "infer").expanduser()
 KEYS_ENV = HOME / "keys.env"
 CONFIG_YAML = HOME / "config.yaml"
 DISCOVERY_CACHE = HOME / ".discovery-cache.json"
@@ -34,8 +34,8 @@ PROBE_CACHE = HOME / ".probe-cache.json"
 PROBE_TTL = 24 * 3600
 PROVIDERS_TOML = GATEWAY_DIR / "providers.toml"
 COMPOSE_FILE = GATEWAY_DIR / "docker-compose.yml"
-PORT = int(os.environ.get("FI_PORT", "4000"))
-HOST = os.environ.get("FI_HOST", "localhost")
+PORT = int(os.environ.get("INFER_PORT", "4000"))
+HOST = os.environ.get("INFER_HOST", "localhost")
 BASE_URL = f"http://{HOST}:{PORT}"
 
 
@@ -565,7 +565,7 @@ def ensure_master_key() -> str:
     values = load_keys()
     if "LITELLM_MASTER_KEY" in values:
         return values["LITELLM_MASTER_KEY"]
-    key = "sk-fi-" + secrets.token_urlsafe(32)
+    key = "sk-infer-" + secrets.token_urlsafe(32)
     values["LITELLM_MASTER_KEY"] = key
     save_keys(values)
     return key
@@ -691,7 +691,7 @@ def active_providers() -> list[dict]:
 
 def compose(*args: str, capture: bool = False) -> subprocess.CompletedProcess:
     env = dict(os.environ)
-    env["FI_HOME"] = str(HOME)
+    env["INFER_HOME"] = str(HOME)
     return subprocess.run(
         ["docker", "compose", "-f", str(COMPOSE_FILE), *args],
         env=env,
@@ -804,7 +804,7 @@ def cmd_install(args) -> int:
     if not already:
         if target.is_symlink() or target.exists():
             if not args.force:
-                err(f"{target} already exists and isn't pointing at this fi — pass --force to overwrite")
+                err(f"{target} already exists and isn't a symlink to this script — pass --force to overwrite")
                 return 1
             target.unlink()
         target.symlink_to(src)
@@ -813,24 +813,12 @@ def cmd_install(args) -> int:
         ok(f"already installed: {target} → {src}")
 
     path_dirs = [Path(p).resolve() for p in os.environ.get("PATH", "").split(os.pathsep) if p]
-    rc_file, fmt = _shell_rc()
     on_path = target_dir.resolve() in path_dirs
-    shell = os.environ.get("SHELL", "")
-    bash_or_zsh = "bash" in shell or "zsh" in shell
-    name_collides = name == "fi" and bash_or_zsh
-
     if not on_path:
+        rc_file, fmt = _shell_rc()
         out(f"{C.Y}NOTE: {target_dir} isn't on your $PATH.{C.R} Add this to {rc_file}:")
         out(f"  {fmt.format(target_dir)}")
-    if name_collides:
-        # `fi` is a reserved word in bash/zsh (closes if/then/fi blocks).
-        # An alias works in interactive shells but breaks in scripts and
-        # non-interactive subshells. The robust fix is renaming the symlink.
-        out(f"{C.Y}NOTE: `fi` is a reserved word in bash/zsh — bare `fi` calls error.{C.R}")
-        out(f"  Recommended: reinstall under a non-reserved name:")
-        out(f"    ./infer install --name figw --force")
-        out(f"  Or, for interactive shells only: add  alias fi='command fi'  to {rc_file}")
-    if on_path and not name_collides:
+    else:
         out(f"You can now run `{name}` from anywhere.")
     return 0
 
@@ -1308,9 +1296,9 @@ def cmd_test_anthropic(args) -> int:
 #   patch:   callable(config_json, master_key, gateway_url) -> new_json
 #   unpatch: callable(config_json) -> new_json
 
-FI_OPENAI_URL = f"{BASE_URL}/v1"
-FI_ANTHROPIC_URL = BASE_URL
-FI_PROVIDER_ID = "fi"
+INFER_OPENAI_URL = f"{BASE_URL}/v1"
+INFER_ANTHROPIC_URL = BASE_URL
+INFER_PROVIDER_ID = "infer"
 # Concrete aliases exposed to wired coding-agent CLIs. Deliberately a short,
 # diverse list so their /model pickers aren't spammed; users can edit
 # providers.toml or their client config to add more. Picked to cover a mix
@@ -1327,19 +1315,18 @@ FI_WIRE_MODELS = (
 
 
 def _wire_pi_check(cfg: dict) -> bool:
-    return FI_PROVIDER_ID in (cfg.get("providers") or {})
+    return INFER_PROVIDER_ID in (cfg.get("providers") or {})
 
 def _wire_pi_patch(cfg: dict, master: str) -> dict:
     providers = cfg.setdefault("providers", {})
-    providers[FI_PROVIDER_ID] = {
-        "baseUrl": FI_OPENAI_URL,
+    providers[INFER_PROVIDER_ID] = {
+        "baseUrl": INFER_OPENAI_URL,
         "api": "openai-completions",
         "apiKey": master,
         "models": [
             {
                 "id": mid,
-                "name": f"fi/{mid}",
-                # "vision" in alias is a good proxy; users can edit post-wire
+                "name": f"infer/{mid}",
                 "reasoning": "r1" in mid or "reasoning" in mid,
                 "input": ["text", "image"] if any(t in mid.lower() for t in ("gemini", "vision", "-vl-")) else ["text"],
                 "contextWindow": 128000,
@@ -1353,59 +1340,59 @@ def _wire_pi_patch(cfg: dict, master: str) -> dict:
 
 def _wire_pi_unpatch(cfg: dict) -> dict:
     providers = cfg.get("providers") or {}
-    providers.pop(FI_PROVIDER_ID, None)
+    providers.pop(INFER_PROVIDER_ID, None)
     return cfg
 
 
 def _wire_opencode_check(cfg: dict) -> bool:
-    return FI_PROVIDER_ID in (cfg.get("provider") or {})
+    return INFER_PROVIDER_ID in (cfg.get("provider") or {})
 
 def _wire_opencode_patch(cfg: dict, master: str) -> dict:
     cfg.setdefault("$schema", "https://opencode.ai/config.json")
     providers = cfg.setdefault("provider", {})
-    providers[FI_PROVIDER_ID] = {
+    providers[INFER_PROVIDER_ID] = {
         "npm": "@ai-sdk/openai-compatible",
-        "name": "fi gateway",
-        "options": {"baseURL": FI_OPENAI_URL, "apiKey": master},
-        "models": {mid: {"name": f"fi/{mid}"} for mid in FI_WIRE_MODELS},
+        "name": "infer gateway",
+        "options": {"baseURL": INFER_OPENAI_URL, "apiKey": master},
+        "models": {mid: {"name": f"infer/{mid}"} for mid in FI_WIRE_MODELS},
     }
     return cfg
 
 def _wire_opencode_unpatch(cfg: dict) -> dict:
     providers = cfg.get("provider") or {}
-    providers.pop(FI_PROVIDER_ID, None)
+    providers.pop(INFER_PROVIDER_ID, None)
     return cfg
 
 
 def _wire_cc_check(cfg: dict) -> bool:
     env = cfg.get("env") or {}
-    return env.get("ANTHROPIC_BASE_URL") == FI_ANTHROPIC_URL
+    return env.get("ANTHROPIC_BASE_URL") == INFER_ANTHROPIC_URL
 
 def _wire_cc_patch(cfg: dict, master: str) -> dict:
     env = cfg.setdefault("env", {})
-    env["ANTHROPIC_BASE_URL"] = FI_ANTHROPIC_URL
+    env["ANTHROPIC_BASE_URL"] = INFER_ANTHROPIC_URL
     env["ANTHROPIC_API_KEY"] = master
     return cfg
 
 def _wire_cc_unpatch(cfg: dict) -> dict:
     env = cfg.get("env") or {}
-    if env.get("ANTHROPIC_BASE_URL") == FI_ANTHROPIC_URL:
+    if env.get("ANTHROPIC_BASE_URL") == INFER_ANTHROPIC_URL:
         env.pop("ANTHROPIC_BASE_URL", None)
         env.pop("ANTHROPIC_API_KEY", None)
     return cfg
 
 
 def _wire_openclaw_check_text(cfg_text: str) -> bool:
-    return BASE_URL in cfg_text and FI_PROVIDER_ID in cfg_text
+    return BASE_URL in cfg_text and INFER_PROVIDER_ID in cfg_text
 
 def _wire_openclaw_run(master: str) -> int:
-    """Shell out to openclaw's onboarding CLI to register fi as a custom
+    """Shell out to openclaw's onboarding CLI to register infer as a custom
     OpenAI-compatible provider. openclaw owns the YAML format."""
     return subprocess.run([
         "openclaw", "onboard",
         "--auth-choice", "custom-api-key",
-        "--custom-provider-id", FI_PROVIDER_ID,
-        "--custom-base-url", FI_OPENAI_URL,
+        "--custom-provider-id", INFER_PROVIDER_ID,
+        "--custom-base-url", INFER_OPENAI_URL,
         "--custom-api-key", master,
         "--custom-model-id", FI_WIRE_MODELS[0],
         "--custom-compatibility", "openai",
@@ -1419,7 +1406,7 @@ def _wire_hermes_run(master: str) -> int:
     """Use hermes config set commands — hermes owns the YAML format."""
     pairs = [
         ("model.provider", "custom"),
-        ("model.base_url", FI_OPENAI_URL),
+        ("model.base_url", INFER_OPENAI_URL),
         ("model.api_key", master),
         ("model.default", FI_WIRE_MODELS[0]),
     ]
@@ -1509,7 +1496,7 @@ def _save_config(path: Path, data: dict, mode: int | None = None) -> None:
 
 
 def _backup_path(path: Path) -> Path:
-    return path.with_suffix(path.suffix + ".fi-backup")
+    return path.with_suffix(path.suffix + ".infer-backup")
 
 
 def cmd_detect(args) -> int:
@@ -1522,7 +1509,7 @@ def cmd_detect(args) -> int:
             print(f"{name:<10} {C.D}no{C.R:<19} {'—':<50} {C.D}(not installed){C.R}")
             continue
         wired = _is_wired(t)
-        status = f"{C.G}wired to fi{C.R}" if wired else f"{C.Y}not wired{C.R}"
+        status = f"{C.G}wired to infer{C.R}" if wired else f"{C.Y}not wired{C.R}"
         cfg_display = str(t["config"])
         if len(cfg_display) > 49:
             cfg_display = "…" + cfg_display[-48:]
@@ -1545,7 +1532,7 @@ def cmd_wire(args) -> int:
         out(f"{C.D}generated master key (will be used by {args.tool}){C.R}")
     cfg_path = t["config"]
     if _is_wired(t):
-        out(f"{args.tool} is already wired to fi. Run `./infer unwire {args.tool}` to undo.")
+        out(f"{args.tool} is already wired to infer. Run `./infer unwire {args.tool}` to undo.")
         return 0
     if cfg_path.exists():
         backup = _backup_path(cfg_path)
@@ -1563,7 +1550,7 @@ def cmd_wire(args) -> int:
         mode = 0o600 if args.tool == "cc" else None
         _save_config(cfg_path, new_cfg, mode=mode)
     ok(f"wired {args.tool} — config at {cfg_path}")
-    out(f"  - base URL: {FI_OPENAI_URL if args.tool != 'cc' else FI_ANTHROPIC_URL}")
+    out(f"  - base URL: {INFER_OPENAI_URL if args.tool != 'cc' else INFER_ANTHROPIC_URL}")
     out(f"  - master key: {mask(master)}")
     out(f"Start the gateway with `./infer start` (if not already running).")
     return 0
@@ -1590,11 +1577,11 @@ def cmd_unwire(args) -> int:
         # a backup. The wire flow always writes one before calling the
         # tool's CLI, so this branch only fires if the user deleted the
         # backup or wired manually.
-        out(f"no backup found at {backup}; manually edit {cfg_path} to remove the fi block")
+        out(f"no backup found at {_backup_path(cfg_path)}; manually edit {cfg_path} to remove the infer block")
         return 0
     cfg = _load_config(cfg_path)
     if not t["check"](cfg):
-        out(f"{args.tool} is not wired to fi — nothing to do")
+        out(f"{args.tool} is not wired to infer — nothing to do")
         return 0
     new_cfg = t["unpatch"](cfg)
     _save_config(cfg_path, new_cfg)
@@ -1667,10 +1654,10 @@ def build_parser() -> argparse.ArgumentParser:
     pt.set_defaults(fn=cmd_test)
 
     sub.add_parser("detect", help="Scan for installed client CLIs (pi, opencode, cc) and show wiring status").set_defaults(fn=cmd_detect)
-    pw = sub.add_parser("wire", help="Wire a client CLI to the fi gateway (edits its config, saves .fi-backup)")
+    pw = sub.add_parser("wire", help="Wire a client CLI to the infer gateway (edits its config, saves .infer-backup)")
     pw.add_argument("tool", choices=["pi", "opencode", "cc", "openclaw", "hermes"])
     pw.set_defaults(fn=cmd_wire)
-    pu = sub.add_parser("unwire", help="Remove fi from a client CLI's config (restores from .fi-backup if present)")
+    pu = sub.add_parser("unwire", help="Remove infer from a client CLI's config (restores from .infer-backup if present)")
     pu.add_argument("tool", choices=["pi", "opencode", "cc", "openclaw", "hermes"])
     pu.set_defaults(fn=cmd_unwire)
 

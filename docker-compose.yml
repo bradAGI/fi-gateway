@@ -1,14 +1,14 @@
 services:
   litellm:
     image: ghcr.io/berriai/litellm:main-stable
-    container_name: fi-litellm
+    container_name: infer-litellm
     restart: unless-stopped
     ports:
-      - "${FI_PORT:-4000}:4000"
+      - "${INFER_PORT:-4000}:4000"
     env_file:
-      - ${FI_HOME}/keys.env
+      - ${INFER_HOME}/keys.env
     volumes:
-      - ${FI_HOME}/config.yaml:/app/config.yaml:ro
+      - ${INFER_HOME}/config.yaml:/app/config.yaml:ro
     command: ["--config", "/app/config.yaml", "--port", "4000", "--host", "0.0.0.0"]
     healthcheck:
       # The litellm image is python:slim — no wget/curl. Use the Python

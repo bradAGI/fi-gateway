@@ -1,6 +1,6 @@
 ---
 name: infer
-description: Drive the `infer` CLI (the fi-gateway unified inference gateway) — a Python CLI that aggregates ~150 free LLM models (Gemini, Groq, OpenRouter, NVIDIA NIM, Cerebras, Mistral, Scaleway, Voyage, Jina, Cohere, Together, Hunyuan, Chutes, LLM7, Ollama Cloud) behind a single OpenAI- and Anthropic-compatible endpoint at http://localhost:4000. Trigger whenever the user asks to add API keys for any LLM provider; start/stop/check a local LLM proxy; list available models; test a model; add a new provider to `providers.toml`; refresh auto-discovered catalogs; debug routing or upstream errors; wire a coding agent CLI (Claude Code, opencode, pi-mono, openclaw, hermes); or mentions "fi", "infer", "my free keys", "free models", "local proxy", "free inference", "gateway".
+description: Drive the `infer` CLI (a gateway) — a Python CLI that aggregates ~150 free LLM models (Gemini, Groq, OpenRouter, NVIDIA NIM, Cerebras, Mistral, Scaleway, Voyage, Jina, Cohere, Together, Hunyuan, Chutes, LLM7, Ollama Cloud) behind a single OpenAI- and Anthropic-compatible endpoint at http://localhost:4000. Trigger whenever the user asks to add API keys for any LLM provider; start/stop/check a local LLM proxy; list available models; test a model; add a new provider to `providers.toml`; refresh auto-discovered catalogs; debug routing or upstream errors; wire a coding agent CLI (Claude Code, opencode, pi-mono, openclaw, hermes); or mentions "infer", "my free keys", "free models", "local proxy", "free inference", "gateway".
 ---
 
 # infer — Free-Inference Gateway
@@ -12,7 +12,7 @@ This skill teaches your agent how to drive `infer`, the CLI at the skill root th
 Trigger phrases:
 
 - "add my **<provider>** key" / "store my **<provider>** key" / "I got a **<provider>** key"
-- "start / boot / spin up the **proxy** / **gateway** / fi / infer"
+- "start / boot / spin up the **proxy** / **gateway** / infer"
 - "what free **models** do I have" / "list my models" / "models I can use"
 - "test **<model>**" / "smoke test" / "ping gemini-2.5-flash"
 - "show me **smart** / **code** / **vision** models" (filter by tag)
@@ -32,7 +32,7 @@ The skill lives at the repo root — everything is co-located:
 - `docker-compose.yml` — defines the LiteLLM proxy service.
 - `SKILL.md` — this file.
 
-User data lives outside the skill in `~/.config/free-inference/`:
+User data lives outside the skill in `~/.config/infer/`:
 
 - `keys.env` — user's keys, chmod 600, never synced with the skill.
 - `config.yaml` — auto-generated every `./infer start` / `./infer reload`.
@@ -64,11 +64,11 @@ Drive the CLI directly with `./infer`:
 ./infer test-anthropic <model> [--prompt P]    Anthropic shape (/v1/messages)
 
 ./infer detect                                 Scan for installed client CLIs (pi, opencode, cc, openclaw, hermes)
-./infer wire <tool>                            Edit client config so it routes through fi (backs up to .fi-backup)
+./infer wire <tool>                            Edit client config so it routes through infer (backs up to .infer-backup)
 ./infer unwire <tool>                          Restore the client config from the backup
 ```
 
-The first `./infer start` prints a generated **master key** (`sk-fi-…`). That's what clients use, not the underlying provider keys.
+The first `./infer start` prints a generated **master key** (`sk-infer-…`). That's what clients use, not the underlying provider keys.
 
 ## Capability tags
 
@@ -114,7 +114,7 @@ Instead of (or alongside) static `[[provider.model]]` blocks, declare `discovery
 | `nvidia_nim` | `integrate.api.nvidia.com/v1/models` | required (the key) |
 | `huggingface_inference` | `router.huggingface.co/v1/models` (live providers, HF $0.10/mo credits) | required |
 
-Results cache 24h at `~/.config/free-inference/.discovery-cache.json`. Users can run `./infer sync` to force-refresh. Discovery skips providers without a key (except keyless providers).
+Results cache 24h at `~/.config/infer/.discovery-cache.json`. Users can run `./infer sync` to force-refresh. Discovery skips providers without a key (except keyless providers).
 
 ### LiteLLM prefix pitfalls
 
@@ -122,17 +122,17 @@ Results cache 24h at `~/.config/free-inference/.discovery-cache.json`. Users can
 
 ## Wiring coding-agent CLIs
 
-`./infer detect` / `./infer wire <tool>` / `./infer unwire <tool>` auto-configure five client CLIs to route through the gateway. Each `wire` backs up the original config to `<path>.fi-backup`; `unwire` restores from it.
+`./infer detect` / `./infer wire <tool>` / `./infer unwire <tool>` auto-configure five client CLIs to route through the gateway. Each `wire` backs up the original config to `<path>.infer-backup`; `unwire` restores from it.
 
 | Tool  | Binary    | Config file                                        | Mechanism | What gets written |
 |-------|-----------|----------------------------------------------------|-----------|-------------------|
 | `cc`  | `claude`  | `~/.claude/settings.json`                          | direct JSON edit | `env.ANTHROPIC_BASE_URL` + master key, settings chmod 600 |
-| `opencode` | `opencode` | `~/.config/opencode/opencode.json`           | direct JSON edit | `provider.fi` block (`@ai-sdk/openai-compatible`, localhost:4000/v1, curated default models: Gemini Flash, Llama 3.3 70B, DeepSeek V3.2, Qwen3 Coder 480B, OR free, LLM7 GPT-OSS) |
-| `pi`  | `pi`      | `~/.pi/agent/models.json`                          | direct JSON edit | `providers.fi` (`api: openai-completions`, localhost:4000/v1, same curated default model list) |
-| `openclaw` | `openclaw` | `~/.openclaw/config.yaml`                     | shells out to `openclaw onboard --custom-base-url …` | OpenClaw's onboarding wizard registers fi as a custom OpenAI-compatible provider |
+| `opencode` | `opencode` | `~/.config/opencode/opencode.json`           | direct JSON edit | `provider.infer` block (`@ai-sdk/openai-compatible`, localhost:4000/v1, curated default models: Gemini Flash, Llama 3.3 70B, DeepSeek V3.2, Qwen3 Coder 480B, OR free, LLM7 GPT-OSS) |
+| `pi`  | `pi`      | `~/.pi/agent/models.json`                          | direct JSON edit | `providers.infer` (`api: openai-completions`, localhost:4000/v1, same curated default model list) |
+| `openclaw` | `openclaw` | `~/.openclaw/config.yaml`                     | shells out to `openclaw onboard --custom-base-url …` | OpenClaw's onboarding wizard registers infer as a custom OpenAI-compatible provider |
 | `hermes` | `hermes` | `~/.hermes/config.yaml`                          | shells out to `hermes config set model.…` | Sets `model.provider=custom`, `base_url`, `api_key`, and `default` |
 
-Trigger phrases: "wire Claude Code to fi", "wire openclaw / hermes / pi to fi", "point my CLI at fi", "set up fi for opencode", "detect my coding agents", "undo the fi wiring".
+Trigger phrases: "wire to infer", "point my CLI at infer", "set up infer for opencode", "detect my coding agents", "undo the infer wiring".
 
 After wiring, tell the user to run `./infer start` if the proxy isn't up yet — the edited configs are harmless when localhost:4000 is unreachable (clients just error at request time).
 
@@ -173,10 +173,10 @@ Almost always a `litellm_prefix` issue. Switch the provider from `openai` to its
 ## Hard rules
 
 - **Never push to git** unless the user explicitly says so.
-- **Never commit `~/.config/free-inference/*`** — those are user secrets.
+- **Never commit `~/.config/infer/*`** — those are user secrets.
 - **Never add Co-Authored-By or Claude/Anthropic attribution** to commits, PRs, or any generated content.
 - **Never mock** an upstream provider — if a key is missing, fail loudly rather than fake a response.
-- **Never edit `fi` to add third-party dependencies** without asking — the CLI is stdlib-only on purpose.
+- **Never edit `infer` to add third-party dependencies** without asking — the CLI is stdlib-only on purpose.
 - **Never store keys in `providers.toml`** — they belong in `keys.env` only.
 
 ## Quick patterns
@@ -188,7 +188,7 @@ Claude should:
 1. `./infer keys add gemini AIza…`
 2. `./infer keys add nvidia nvapi-…`
 3. `./infer start`
-4. Report the `sk-fi-…` master key + the OpenAI SDK snippet.
+4. Report the `sk-infer-…` master key + the OpenAI SDK snippet.
 
 **Ask Claude to debug:**
 > "why is `./infer test meta/function-xyz-v2` returning 404?"

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="banner.png" alt="fi — free-inference gateway" width="100%">
+  <img src="banner.png" alt="infer — free LLM gateway" width="100%">
 </p>
 
 <h1 align="center">fi-gateway</h1>
@@ -38,7 +38,7 @@ git clone https://github.com/bradAGI/fi-gateway && cd fi-gateway
 ./infer keys add nvidia nvapi-...
 ./infer keys add openrouter sk-or-...
 
-./infer start                  # prints the master key (sk-fi-…)
+./infer start                  # prints the master key (sk-infer-…)
 ./infer probe                  # parallel smoke test, caches working/broken
 ./infer reload                 # regenerate config, expose only verified models
 ```
@@ -62,11 +62,9 @@ infer doctor               # works from any directory
 
 Detects your shell (bash / zsh / fish on macOS and Linux) and prints the right `~/.zshrc` / `~/.bashrc` / `~/.config/fish/config.fish` line if `~/.local/bin` isn't on `$PATH`. `./infer uninstall` removes the symlink. Pass `--name <other>` to install under a different command name.
 
-> Earlier versions used the binary name `fi`, which collided with bash's reserved keyword. The CLI is now `infer`. The `fi` provider slug in wired client configs (`provider.fi`, etc.) is unchanged for backward compatibility.
-
 That's it — your wired agent now routes through `localhost:4000` using your free keys. Every wired tool gets a clean `/v1/models` list of probe-verified callable aliases.
 
-> **Custom port?** Export `FI_PORT=8080` (or any free port) before any `./infer` invocation and the gateway, doctor output, wire URLs, and probe all use it. Container-internal port is always 4000; only the host-side mapping changes.
+> **Custom port?** Export `INFER_PORT=8080` (or any free port) before any `./infer` invocation and the gateway, doctor output, wire URLs, and probe all use it. Container-internal port is always 4000; only the host-side mapping changes.
 
 ## Talk to your agent
 
@@ -96,7 +94,7 @@ The skill teaches your agent how to drive the gateway. Examples:
 ```python
 # Chat
 from openai import OpenAI
-client = OpenAI(base_url="http://localhost:4000/v1", api_key="sk-fi-…")
+client = OpenAI(base_url="http://localhost:4000/v1", api_key="sk-infer-…")
 client.chat.completions.create(
     model="gemini-2.5-flash",       # any alias from ./infer models --working
     messages=[{"role": "user", "content": "Hello"}],
@@ -107,7 +105,7 @@ client.embeddings.create(model="gemini-embedding-001", input="vectorize me")
 
 # Anthropic shape — works against every model in your catalog, not just real Anthropic
 from anthropic import Anthropic
-client = Anthropic(base_url="http://localhost:4000", api_key="sk-fi-…")
+client = Anthropic(base_url="http://localhost:4000", api_key="sk-infer-…")
 client.messages.create(
     model="gemini-2.5-pro",
     max_tokens=256,
@@ -148,7 +146,7 @@ The catalog tells you what *might* work; probe tells you what *does* work for yo
 ./infer models --working           # filter the catalog to verified hits
 ```
 
-Each run writes `~/.config/free-inference/.probe-cache.json` with status, latency, and error class per alias. On the next `./infer reload`, broken aliases are excluded from `config.yaml` — the router never picks them, clients never see them in `/v1/models`. `./infer sync` prunes stale entries when upstreams rotate their catalogs.
+Each run writes `~/.config/infer/.probe-cache.json` with status, latency, and error class per alias. On the next `./infer reload`, broken aliases are excluded from `config.yaml` — the router never picks them, clients never see them in `/v1/models`. `./infer sync` prunes stale entries when upstreams rotate their catalogs.
 
 ## Auto-discovery
 
@@ -184,15 +182,15 @@ Use `discovery = "<kind>"` instead of static models if the provider exposes a `/
 ## Layout
 
 ```
-fi-gateway/              # skill root == repo root
-├── SKILL.md             # what your agent reads to learn how to drive fi
-├── fi                   # single-file Python CLI (stdlib only)
+infer-gateway/           # skill root == repo root
+├── SKILL.md             # what your agent reads to learn how to drive infer
+├── infer                # single-file Python CLI (stdlib only)
 ├── providers.toml       # catalog
 ├── docker-compose.yml   # one service: LiteLLM proxy
 └── README.md
 ```
 
-User state in `~/.config/free-inference/` (gitignored, 600):
+User state in `~/.config/infer/` (gitignored, 600):
 
 | File | Lifecycle |
 |------|-----------|
@@ -203,7 +201,7 @@ User state in `~/.config/free-inference/` (gitignored, 600):
 
 ## Caveats
 
-- **Wiring locks your tool to gateway liveness** — kill the proxy and your wired client errors until restart. `./infer unwire <tool>` reverts via the `.fi-backup` file.
+- **Wiring locks your tool to gateway liveness** — kill the proxy and your wired client errors until restart. `./infer unwire <tool>` reverts via the `.infer-backup` file.
 - **NVIDIA NIM gating** — many endpoints require separate per-account approval and silently 404 ("Function not found"). Probe catches this.
 - **OpenRouter free-pool 429s** — aggressive shared-tier rate limits on popular free models (gemma, llama, qwen-coder). Re-run probe after the window resets.
 - **Anthropic-shape translation** — the `openai` litellm prefix routes `/v1/messages` through OpenAI's Responses API which most upstreams don't expose. Use the dedicated prefix (`nvidia_nim`, `cohere`, `gemini`) when available.
