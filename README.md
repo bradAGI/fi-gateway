@@ -95,18 +95,57 @@ claude> [runs ./fi doctor — proxy state, providers, keys, probe age, drift, wi
 
 ## Using the endpoint directly
 
-Once `./fi start` is running, any OpenAI / Anthropic SDK points at the same URL:
+Once `./fi start` is running, any OpenAI / Anthropic SDK or `curl` points at the same URL.
+
+### curl
+
+```bash
+MASTER_KEY=$(./fi config show | grep -m1 LITELLM_MASTER_KEY | awk -F: '{print $2}' | xargs)
+# or just: MASTER_KEY=sk-fi-...                                    # printed by ./fi start
+
+# OpenAI shape — chat
+curl http://localhost:4000/v1/chat/completions \
+  -H "Authorization: Bearer $MASTER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-2.5-flash",
+    "messages": [{"role": "user", "content": "Reply with: READY"}],
+    "max_tokens": 64
+  }'
+
+# OpenAI shape — embeddings
+curl http://localhost:4000/v1/embeddings \
+  -H "Authorization: Bearer $MASTER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "gemini-embedding-001", "input": "vectorize me"}'
+
+# Anthropic shape — same gateway, /v1/messages
+curl http://localhost:4000/v1/messages \
+  -H "x-api-key: $MASTER_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-2.5-pro",
+    "max_tokens": 256,
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+
+# Catalog
+curl http://localhost:4000/v1/models -H "Authorization: Bearer $MASTER_KEY" | jq '.data[].id'
+```
+
+### SDKs
 
 ```python
-# OpenAI shape — chat
+# OpenAI shape — chat + embeddings
 from openai import OpenAI
 client = OpenAI(base_url="http://localhost:4000/v1", api_key="sk-fi-…")
+
 client.chat.completions.create(
     model="gemini-2.5-flash",       # any concrete alias from `./fi models --working`
     messages=[{"role": "user", "content": "Hello"}],
 )
 
-# OpenAI shape — embeddings
 client.embeddings.create(
     model="gemini-embedding-001",   # any embed-tagged alias
     input="vectorize me",
