@@ -722,6 +722,218 @@ def cmd_test_anthropic(args) -> int:
         return 1
 
 
+# --- wire: point client CLIs at the gateway -------------------------------
+#
+# Known wire targets. Each describes:
+#   binary:  `which <name>` check
+#   config:  JSON file we edit (resolved via Path.home() at call time)
+#   check:   callable(config_json) -> bool, "already wired" detector
+#   patch:   callable(config_json, master_key, gateway_url) -> new_json
+#   unpatch: callable(config_json) -> new_json
+
+FI_OPENAI_URL = "http://localhost:4000/v1"
+FI_ANTHROPIC_URL = "http://localhost:4000"
+FI_PROVIDER_ID = "fi"
+FI_GROUPS = ("fast", "smart", "code", "reasoning", "vision")
+
+
+def _wire_pi_check(cfg: dict) -> bool:
+    return FI_PROVIDER_ID in (cfg.get("providers") or {})
+
+def _wire_pi_patch(cfg: dict, master: str) -> dict:
+    providers = cfg.setdefault("providers", {})
+    providers[FI_PROVIDER_ID] = {
+        "baseUrl": FI_OPENAI_URL,
+        "api": "openai-completions",
+        "apiKey": master,
+        "models": [
+            {"id": g, "name": f"fi/{g}", "reasoning": g == "reasoning",
+             "input": ["text", "image"] if g == "vision" else ["text"],
+             "contextWindow": 128000, "maxTokens": 4096,
+             "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}}
+            for g in FI_GROUPS
+        ],
+    }
+    return cfg
+
+def _wire_pi_unpatch(cfg: dict) -> dict:
+    providers = cfg.get("providers") or {}
+    providers.pop(FI_PROVIDER_ID, None)
+    return cfg
+
+
+def _wire_opencode_check(cfg: dict) -> bool:
+    return FI_PROVIDER_ID in (cfg.get("provider") or {})
+
+def _wire_opencode_patch(cfg: dict, master: str) -> dict:
+    cfg.setdefault("$schema", "https://opencode.ai/config.json")
+    providers = cfg.setdefault("provider", {})
+    providers[FI_PROVIDER_ID] = {
+        "npm": "@ai-sdk/openai-compatible",
+        "name": "fi gateway",
+        "options": {"baseURL": FI_OPENAI_URL, "apiKey": master},
+        "models": {g: {"name": f"fi/{g}"} for g in FI_GROUPS},
+    }
+    return cfg
+
+def _wire_opencode_unpatch(cfg: dict) -> dict:
+    providers = cfg.get("provider") or {}
+    providers.pop(FI_PROVIDER_ID, None)
+    return cfg
+
+
+def _wire_cc_check(cfg: dict) -> bool:
+    env = cfg.get("env") or {}
+    return env.get("ANTHROPIC_BASE_URL") == FI_ANTHROPIC_URL
+
+def _wire_cc_patch(cfg: dict, master: str) -> dict:
+    env = cfg.setdefault("env", {})
+    env["ANTHROPIC_BASE_URL"] = FI_ANTHROPIC_URL
+    env["ANTHROPIC_API_KEY"] = master
+    return cfg
+
+def _wire_cc_unpatch(cfg: dict) -> dict:
+    env = cfg.get("env") or {}
+    if env.get("ANTHROPIC_BASE_URL") == FI_ANTHROPIC_URL:
+        env.pop("ANTHROPIC_BASE_URL", None)
+        env.pop("ANTHROPIC_API_KEY", None)
+    return cfg
+
+
+def _wire_targets() -> dict:
+    return {
+        "pi": {
+            "binary": "pi",
+            "config": Path.home() / ".pi" / "agent" / "models.json",
+            "check": _wire_pi_check,
+            "patch": _wire_pi_patch,
+            "unpatch": _wire_pi_unpatch,
+        },
+        "opencode": {
+            "binary": "opencode",
+            "config": Path.home() / ".config" / "opencode" / "opencode.json",
+            "check": _wire_opencode_check,
+            "patch": _wire_opencode_patch,
+            "unpatch": _wire_opencode_unpatch,
+        },
+        "cc": {
+            "binary": "claude",
+            "config": Path.home() / ".claude" / "settings.json",
+            "check": _wire_cc_check,
+            "patch": _wire_cc_patch,
+            "unpatch": _wire_cc_unpatch,
+        },
+    }
+
+
+def _tool_installed(binary: str) -> bool:
+    rc = subprocess.run(["bash", "-lc", f"command -v {binary}"],
+                        capture_output=True, text=True).returncode
+    return rc == 0
+
+
+def _load_config(path: Path) -> dict:
+    if not path.exists() or path.stat().st_size == 0:
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError:
+        err(f"config at {path} is not valid JSON")
+        raise
+
+
+def _save_config(path: Path, data: dict, mode: int | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(data, indent=2) + "\n"
+    path.write_text(text)
+    if mode is not None:
+        # Existing-file O_CREAT won't reset perms; chmod explicitly.
+        path.chmod(mode)
+
+
+def _backup_path(path: Path) -> Path:
+    return path.with_suffix(path.suffix + ".fi-backup")
+
+
+def cmd_detect(args) -> int:
+    targets = _wire_targets()
+    print(f"{'Tool':<10} {'Installed':<11} {'Config':<50} Status")
+    print("-" * 90)
+    for name, t in targets.items():
+        installed = _tool_installed(t["binary"])
+        if not installed:
+            print(f"{name:<10} {C.D}no{C.R:<19} {'—':<50} {C.D}(not installed){C.R}")
+            continue
+        cfg_path = t["config"]
+        cfg = _load_config(cfg_path) if cfg_path.exists() else {}
+        wired = t["check"](cfg)
+        status = f"{C.G}wired to fi{C.R}" if wired else f"{C.Y}not wired{C.R}"
+        cfg_display = str(cfg_path)
+        if len(cfg_display) > 49:
+            cfg_display = "…" + cfg_display[-48:]
+        print(f"{name:<10} {C.G}yes{C.R:<19} {cfg_display:<50} {status}")
+    return 0
+
+
+def cmd_wire(args) -> int:
+    targets = _wire_targets()
+    t = targets.get(args.tool)
+    if not t:
+        err(f"unknown tool: {args.tool} (expected one of: {', '.join(targets)})")
+        return 1
+    if not _tool_installed(t["binary"]):
+        err(f"{args.tool} is not installed — skipping")
+        return 1
+    master = load_keys().get("LITELLM_MASTER_KEY")
+    if not master:
+        master = ensure_master_key()
+        out(f"{C.D}generated master key (will be used by {args.tool}){C.R}")
+    cfg_path = t["config"]
+    cfg = _load_config(cfg_path) if cfg_path.exists() else {}
+    if t["check"](cfg):
+        out(f"{args.tool} is already wired to fi. Run `./fi unwire {args.tool}` to undo.")
+        return 0
+    if cfg_path.exists():
+        backup = _backup_path(cfg_path)
+        backup.write_text(cfg_path.read_text())
+        ok(f"backed up {cfg_path} → {backup}")
+    new_cfg = t["patch"](cfg, master)
+    # settings.json should be 600 for Claude Code so keys aren't world-readable
+    mode = 0o600 if args.tool == "cc" else None
+    _save_config(cfg_path, new_cfg, mode=mode)
+    ok(f"wired {args.tool} — config at {cfg_path}")
+    out(f"  - base URL: {FI_OPENAI_URL if args.tool != 'cc' else FI_ANTHROPIC_URL}")
+    out(f"  - master key: {mask(master)}")
+    out(f"Start the gateway with `./fi start` (if not already running).")
+    return 0
+
+
+def cmd_unwire(args) -> int:
+    targets = _wire_targets()
+    t = targets.get(args.tool)
+    if not t:
+        err(f"unknown tool: {args.tool} (expected one of: {', '.join(targets)})")
+        return 1
+    cfg_path = t["config"]
+    backup = _backup_path(cfg_path)
+    if backup.exists():
+        cfg_path.write_text(backup.read_text())
+        backup.unlink()
+        ok(f"restored {cfg_path} from backup, removed {backup}")
+        return 0
+    if not cfg_path.exists():
+        out(f"no config at {cfg_path} — nothing to unwire")
+        return 0
+    cfg = _load_config(cfg_path)
+    if not t["check"](cfg):
+        out(f"{args.tool} is not wired to fi — nothing to do")
+        return 0
+    new_cfg = t["unpatch"](cfg)
+    _save_config(cfg_path, new_cfg)
+    ok(f"removed fi provider from {cfg_path}")
+    return 0
+
+
 # --- argparse wiring ------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
@@ -762,6 +974,14 @@ def build_parser() -> argparse.ArgumentParser:
     pt = sub.add_parser("test", help="OpenAI-shape smoke test")
     pt.add_argument("model"); pt.add_argument("--prompt", default="Reply with the word READY.")
     pt.set_defaults(fn=cmd_test)
+
+    sub.add_parser("detect", help="Scan for installed client CLIs (pi, opencode, cc) and show wiring status").set_defaults(fn=cmd_detect)
+    pw = sub.add_parser("wire", help="Wire a client CLI to the fi gateway (edits its config, saves .fi-backup)")
+    pw.add_argument("tool", choices=["pi", "opencode", "cc"])
+    pw.set_defaults(fn=cmd_wire)
+    pu = sub.add_parser("unwire", help="Remove fi from a client CLI's config (restores from .fi-backup if present)")
+    pu.add_argument("tool", choices=["pi", "opencode", "cc"])
+    pu.set_defaults(fn=cmd_unwire)
 
     pan = sub.add_parser("test-anthropic", help="Anthropic-shape /v1/messages smoke test")
     pan.add_argument("model"); pan.add_argument("--prompt", default="Reply with the word READY.")

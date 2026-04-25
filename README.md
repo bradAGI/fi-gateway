@@ -126,7 +126,25 @@ Full command list:
 
 ./fi test <model> [--prompt P]             OpenAI shape
 ./fi test-anthropic <model> [--prompt P]   Anthropic shape
+
+./fi detect                                Scan installed client CLIs (pi, opencode, cc)
+./fi wire <tool>                           Edit client config to point at fi; saves .fi-backup
+./fi unwire <tool>                         Restore the client config from .fi-backup
 ```
+
+## Wire your CLI tools
+
+`fi` ships bindings for three coding agent CLIs so they can route through the gateway and hit your free keys:
+
+```bash
+./fi detect              # pi / opencode / cc — installed? already wired?
+./fi wire cc             # Claude Code → ~/.claude/settings.json (ANTHROPIC_BASE_URL + key)
+./fi wire opencode       # opencode   → ~/.config/opencode/opencode.json (adds fi provider)
+./fi wire pi             # pi-mono    → ~/.pi/agent/models.json (adds fi provider)
+./fi unwire cc           # restore from ~/.claude/settings.json.fi-backup
+```
+
+Each `wire` saves the original config to `<path>.fi-backup` before editing. `unwire` restores from that backup. Wiring is safe to run before `./fi start` — the edits take effect when the proxy is actually running at localhost:4000. For `cc` the settings file is chmod'd to 600 since it now contains the master key.
 
 ## How it's laid out
 

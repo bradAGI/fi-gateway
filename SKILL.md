@@ -62,6 +62,10 @@ Drive the CLI directly with `./fi`:
 
 ./fi test <model> [--prompt P]              OpenAI shape
 ./fi test-anthropic <model> [--prompt P]    Anthropic shape (/v1/messages)
+
+./fi detect                                 Scan for installed client CLIs (pi, opencode, cc)
+./fi wire <tool>                            Edit client config so it routes through fi (backs up to .fi-backup)
+./fi unwire <tool>                          Restore the client config from the backup
 ```
 
 The first `./fi start` prints a generated **master key** (`sk-fi-…`). That's what clients use, not the underlying provider keys.
@@ -117,6 +121,20 @@ Results cache 24h at `~/.config/free-inference/.discovery-cache.json`. Users can
 ### LiteLLM prefix pitfalls
 
 `litellm_prefix` determines how LiteLLM translates `/v1/messages` (Anthropic shape). The `openai` prefix routes `/v1/messages` through OpenAI's *Responses API* (`/v1/responses`), which most upstreams don't expose — requests 404. Use the dedicated prefix for providers that have one (`nvidia_nim`, `cohere`, `gemini`, `huggingface`, `voyage`). The `openai` prefix is still fine for `/v1/chat/completions`.
+
+## Wiring coding-agent CLIs
+
+`./fi detect` / `./fi wire <tool>` / `./fi unwire <tool>` auto-configure three client CLIs to route through the gateway. Each `wire` backs up the original config to `<path>.fi-backup`; `unwire` restores from it.
+
+| Tool  | Binary    | Config file                                        | What gets written |
+|-------|-----------|----------------------------------------------------|-------------------|
+| `cc`  | `claude`  | `~/.claude/settings.json`                          | `env.ANTHROPIC_BASE_URL=http://localhost:4000` + master key. Settings chmod 600. |
+| `opencode` | `opencode` | `~/.config/opencode/opencode.json`          | `provider.fi` block with `@ai-sdk/openai-compatible`, localhost:4000/v1, master key, five group models (`fast`, `smart`, `code`, `reasoning`, `vision`). |
+| `pi`  | `pi`      | `~/.pi/agent/models.json`                          | `providers.fi` with `api: openai-completions`, localhost:4000/v1, same five group models. |
+
+Trigger phrases: "wire Claude Code to fi", "point my CLI at fi", "set up fi for opencode", "detect my coding agents", "undo the fi wiring".
+
+After wiring, tell the user to run `./fi start` if the proxy isn't up yet — the edited configs are harmless when localhost:4000 is unreachable (clients just error at request time).
 
 ## Workflows
 
