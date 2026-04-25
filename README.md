@@ -53,14 +53,16 @@ git clone https://github.com/bradAGI/fi-gateway && cd fi-gateway
 ./fi wire hermes            # hermes-agent  → ~/.hermes/config.yaml        (via `hermes config set`)
 ```
 
-**4.** *(Optional)* Make `fi` run from anywhere:
+**4.** *(Optional)* Make the command run from anywhere:
 
 ```bash
-./fi install                # symlinks ~/.local/bin/fi → this script
-fi doctor                   # now works from any directory
+./fi install --name figw    # symlinks ~/.local/bin/figw → this script
+figw doctor                 # works from any directory
 ```
 
-Detects your shell (bash / zsh / fish — works on macOS and Linux) and prints the right `~/.zshrc` or `~/.bashrc` line if `~/.local/bin` isn't on `$PATH`. `./fi uninstall` removes the symlink.
+> **Why `figw` and not `fi`?** Bash and zsh both treat `fi` as a reserved keyword (it closes `if`/`then`/`fi` blocks), so a bare `fi` command produces a syntax error. `./fi install` (no `--name`) defaults to `fi` and warns if your shell collides; pass `--name figw` (or any non-reserved name) for a clean fix that works in scripts too. Aliases also work but only in interactive shells.
+
+Detects your shell (bash / zsh / fish on macOS and Linux) and prints the right `~/.zshrc` / `~/.bashrc` / `~/.config/fish/config.fish` line if the target directory isn't on `$PATH`. `./fi uninstall --name figw` removes the symlink.
 
 That's it — your wired agent now routes through `localhost:4000` using your free keys. Every wired tool gets a clean `/v1/models` list of probe-verified callable aliases.
 
@@ -118,8 +120,8 @@ client.messages.create(
 ```
 Lifecycle    ./fi start | stop | restart | reload | status | logs [-f]
 Health       ./fi doctor                        proxy + providers + keys + probe age + drift + wired clients
-Globalize    ./fi install [--dir D] [--force]   symlink fi into a $PATH directory
-             ./fi uninstall [--dir D]           remove the symlink
+Globalize    ./fi install [--name N] [--dir D] [--force]   symlink into a $PATH directory (default name 'fi'; use 'figw' to dodge bash's reserved word)
+             ./fi uninstall [--name N] [--dir D]            remove the symlink
 Keys         ./fi keys add <provider> <key>
              ./fi keys list | remove <provider> [--index N]
 Catalog      ./fi providers                     active vs inactive

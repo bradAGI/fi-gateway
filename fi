@@ -783,31 +783,46 @@ def cmd_install(args) -> int:
     target_dir = _install_target_dir(args.dir)
     target_dir.mkdir(parents=True, exist_ok=True)
     src = GATEWAY_DIR / "fi"
-    target = target_dir / "fi"
-    if target.is_symlink() or target.exists():
-        if target.is_symlink() and target.resolve() == src.resolve():
-            ok(f"already installed: {target} → {src}")
-            return 0
-        if not args.force:
-            err(f"{target} already exists and isn't pointing at this fi — pass --force to overwrite")
-            return 1
-        target.unlink()
-    target.symlink_to(src)
-    ok(f"installed: {target} → {src}")
-    # PATH check — Mac default zsh + Linux default bash both handled
+    name = args.name
+    target = target_dir / name
+
+    already = (target.is_symlink() and target.resolve() == src.resolve())
+    if not already:
+        if target.is_symlink() or target.exists():
+            if not args.force:
+                err(f"{target} already exists and isn't pointing at this fi — pass --force to overwrite")
+                return 1
+            target.unlink()
+        target.symlink_to(src)
+        ok(f"installed: {target} → {src}")
+    else:
+        ok(f"already installed: {target} → {src}")
+
     path_dirs = [Path(p).resolve() for p in os.environ.get("PATH", "").split(os.pathsep) if p]
-    if target_dir.resolve() not in path_dirs:
-        rc_file, fmt = _shell_rc()
+    rc_file, fmt = _shell_rc()
+    on_path = target_dir.resolve() in path_dirs
+    shell = os.environ.get("SHELL", "")
+    bash_or_zsh = "bash" in shell or "zsh" in shell
+    name_collides = name == "fi" and bash_or_zsh
+
+    if not on_path:
         out(f"{C.Y}NOTE: {target_dir} isn't on your $PATH.{C.R} Add this to {rc_file}:")
         out(f"  {fmt.format(target_dir)}")
-        out(f"Then `source {rc_file}` or open a new shell.")
-    else:
-        out(f"You can now run `fi` from anywhere.")
+    if name_collides:
+        # `fi` is a reserved word in bash/zsh (closes if/then/fi blocks).
+        # An alias works in interactive shells but breaks in scripts and
+        # non-interactive subshells. The robust fix is renaming the symlink.
+        out(f"{C.Y}NOTE: `fi` is a reserved word in bash/zsh — bare `fi` calls error.{C.R}")
+        out(f"  Recommended: reinstall under a non-reserved name:")
+        out(f"    ./fi install --name figw --force")
+        out(f"  Or, for interactive shells only: add  alias fi='command fi'  to {rc_file}")
+    if on_path and not name_collides:
+        out(f"You can now run `{name}` from anywhere.")
     return 0
 
 def cmd_uninstall(args) -> int:
     target_dir = _install_target_dir(args.dir)
-    target = target_dir / "fi"
+    target = target_dir / args.name
     if target.is_symlink():
         target.unlink()
         ok(f"removed symlink: {target}")
@@ -1581,12 +1596,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="Show proxy + provider status").set_defaults(fn=cmd_status)
     sub.add_parser("doctor", help="One-shot health overview: gateway, providers, keys, discovery + probe age, drift, wired clients").set_defaults(fn=cmd_doctor)
 
-    pi_install = sub.add_parser("install", help="Symlink fi into a directory on $PATH so `fi` works from anywhere")
+    pi_install = sub.add_parser("install", help="Symlink fi into a directory on $PATH so the command works from anywhere")
     pi_install.add_argument("--dir", default=None, help="Target dir (default: ~/.local/bin)")
+    pi_install.add_argument("--name", default="fi", help="Symlink name (default: fi). Use e.g. --name figw if `fi` collides with bash's reserved word.")
     pi_install.add_argument("--force", action="store_true", help="Overwrite an existing entry")
     pi_install.set_defaults(fn=cmd_install)
     pu_install = sub.add_parser("uninstall", help="Remove the symlink created by `./fi install`")
     pu_install.add_argument("--dir", default=None, help="Target dir (default: ~/.local/bin)")
+    pu_install.add_argument("--name", default="fi", help="Symlink name to remove (default: fi)")
     pu_install.set_defaults(fn=cmd_uninstall)
 
     pl = sub.add_parser("logs", help="Tail litellm logs")
