@@ -1303,7 +1303,19 @@ INFER_PROVIDER_ID = "infer"
 # diverse list so their /model pickers aren't spammed; users can edit
 # providers.toml or their client config to add more. Picked to cover a mix
 # of providers (Gemini, NVIDIA, OpenRouter free, keyless LLM7).
-FI_WIRE_MODELS = (
+def _wire_model_list() -> list[str]:
+    """Models the wire commands expose to client CLIs.
+
+    Prefer the probe-verified working set so users see exactly the models
+    that actually respond for their account. Falls back to a curated
+    starter list (FI_WIRE_MODELS_FALLBACK) when no probe cache exists yet —
+    so the first wire on a clean install still produces something useful."""
+    cache = load_probe_cache(ignore_ttl=True) or {}
+    working = sorted(alias for alias, r in cache.items() if r.get("ok"))
+    return working if working else list(FI_WIRE_MODELS_FALLBACK)
+
+
+FI_WIRE_MODELS_FALLBACK = (
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
     "meta/llama-3.3-70b-instruct",
@@ -1333,7 +1345,7 @@ def _wire_pi_patch(cfg: dict, master: str) -> dict:
                 "maxTokens": 4096,
                 "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
             }
-            for mid in FI_WIRE_MODELS
+            for mid in _wire_model_list()
         ],
     }
     return cfg
@@ -1385,7 +1397,7 @@ def _wire_opencode_patch(cfg: dict, master: str) -> dict:
         "npm": "@ai-sdk/openai-compatible",
         "name": "infer gateway",
         "options": {"baseURL": INFER_OPENAI_URL, "apiKey": master},
-        "models": {mid: {"name": f"infer/{mid}"} for mid in FI_WIRE_MODELS},
+        "models": {mid: {"name": f"infer/{mid}"} for mid in _wire_model_list()},
     }
     _opencode_auth_set(master)
     return cfg
@@ -1427,7 +1439,7 @@ def _wire_openclaw_run(master: str) -> int:
         "--custom-provider-id", INFER_PROVIDER_ID,
         "--custom-base-url", INFER_OPENAI_URL,
         "--custom-api-key", master,
-        "--custom-model-id", FI_WIRE_MODELS[0],
+        "--custom-model-id", _wire_model_list()[0],
         "--custom-compatibility", "openai",
     ]).returncode
 
@@ -1441,7 +1453,7 @@ def _wire_hermes_run(master: str) -> int:
         ("model.provider", "custom"),
         ("model.base_url", INFER_OPENAI_URL),
         ("model.api_key", master),
-        ("model.default", FI_WIRE_MODELS[0]),
+        ("model.default", _wire_model_list()[0]),
     ]
     for key, val in pairs:
         rc = subprocess.run(["hermes", "config", "set", key, val]).returncode
