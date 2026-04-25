@@ -35,6 +35,8 @@ PROBE_TTL = 24 * 3600
 PROVIDERS_TOML = GATEWAY_DIR / "providers.toml"
 COMPOSE_FILE = GATEWAY_DIR / "docker-compose.yml"
 PORT = int(os.environ.get("FI_PORT", "4000"))
+HOST = os.environ.get("FI_HOST", "localhost")
+BASE_URL = f"http://{HOST}:{PORT}"
 
 
 # --- pretty output --------------------------------------------------------
@@ -687,12 +689,9 @@ def compose(*args: str, capture: bool = False) -> subprocess.CompletedProcess:
 
 # --- health probes --------------------------------------------------------
 
-def base_url() -> str:
-    return f"http://localhost:{PORT}"
-
 def is_alive(timeout: float = 2.0) -> bool:
     try:
-        with urllib.request.urlopen(f"{base_url()}/health/liveliness", timeout=timeout) as r:
+        with urllib.request.urlopen(f"{BASE_URL}/health/liveliness", timeout=timeout) as r:
             return r.status == 200
     except Exception:
         return False
@@ -707,7 +706,7 @@ def wait_alive(deadline: float = 60.0) -> bool:
 
 def post(path: str, body: dict, headers: dict, timeout: float = 60.0) -> dict:
     req = urllib.request.Request(
-        f"{base_url()}{path}",
+        f"{BASE_URL}{path}",
         data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json", **headers},
     )
@@ -731,7 +730,7 @@ def cmd_start(args) -> int:
     if not wait_alive():
         err("proxy did not come up in 60s — check `./fi logs`")
         return 1
-    ok(f"proxy live on {base_url()}")
+    ok(f"proxy live on {BASE_URL}")
     info("Master key", load_keys().get("LITELLM_MASTER_KEY", ""))
     return 0
 
@@ -778,7 +777,7 @@ def cmd_doctor(args) -> int:
     # --- gateway / proxy ----------------------------------------------------
     alive = is_alive()
     print(f"{C.B}GATEWAY{C.R}")
-    print(f"  proxy: {C.G}up at http://localhost:{PORT}{C.R}" if alive
+    print(f"  proxy: {C.G}up at {BASE_URL}{C.R}" if alive
           else f"  proxy: {C.RD}down{C.R} — run `./fi start`")
     master = load_keys().get("LITELLM_MASTER_KEY")
     if master:
@@ -842,12 +841,12 @@ def cmd_doctor(args) -> int:
     if alive and master:
         try:
             req = urllib.request.Request(
-                f"http://localhost:{PORT}/v1/models",
+                f"{BASE_URL}/v1/models",
                 headers={"Authorization": f"Bearer {master}"},
             )
             with urllib.request.urlopen(req, timeout=5) as r:
                 exposed = len(json.loads(r.read()).get("data", []))
-            print(f"\n{C.B}EXPOSED{C.R}  {exposed} aliases callable via http://localhost:{PORT}/v1/models")
+            print(f"\n{C.B}EXPOSED{C.R}  {exposed} aliases callable via {BASE_URL}/v1/models")
         except Exception:
             pass
 
@@ -1023,7 +1022,7 @@ def _probe_one(master: str, alias: str, timeout: int = 20) -> tuple[str, dict]:
         "max_tokens": 256,
     }
     req = urllib.request.Request(
-        f"http://localhost:{PORT}/v1/chat/completions",
+        f"{BASE_URL}/v1/chat/completions",
         data=json.dumps(body).encode(),
         headers={"Authorization": f"Bearer {master}", "Content-Type": "application/json"},
     )
@@ -1063,7 +1062,7 @@ def _probe_one_embed(master: str, alias: str, timeout: int = 20) -> tuple[str, d
     """Smoke-test an embedding alias via /v1/embeddings."""
     body = {"model": alias, "input": "test"}
     req = urllib.request.Request(
-        f"http://localhost:{PORT}/v1/embeddings",
+        f"{BASE_URL}/v1/embeddings",
         data=json.dumps(body).encode(),
         headers={"Authorization": f"Bearer {master}", "Content-Type": "application/json"},
     )
@@ -1149,7 +1148,7 @@ def cmd_probe(args) -> int:
         return 1
     n_chat = sum(1 for _, k in targets if k == "chat")
     n_embed = sum(1 for _, k in targets if k == "embed")
-    out(f"Probing {len(targets)} aliases at http://localhost:{PORT} "
+    out(f"Probing {len(targets)} aliases at {BASE_URL} "
         f"({n_chat} chat, {n_embed} embed; concurrency={args.concurrency}, timeout={args.timeout}s)…")
     results: dict[str, dict] = {}
     # Preserve existing results for aliases we're not re-probing this run.
@@ -1218,8 +1217,8 @@ def cmd_test_anthropic(args) -> int:
 #   patch:   callable(config_json, master_key, gateway_url) -> new_json
 #   unpatch: callable(config_json) -> new_json
 
-FI_OPENAI_URL = "http://localhost:4000/v1"
-FI_ANTHROPIC_URL = "http://localhost:4000"
+FI_OPENAI_URL = f"{BASE_URL}/v1"
+FI_ANTHROPIC_URL = BASE_URL
 FI_PROVIDER_ID = "fi"
 # Concrete aliases exposed to wired coding-agent CLIs. Deliberately a short,
 # diverse list so their /model pickers aren't spammed; users can edit

@@ -45,6 +45,8 @@ npx skills add bradagi/fi-gateway
 
 That's it — your wired agent now routes through `localhost:4000` using your free keys. Every wired tool gets a clean `/v1/models` list of probe-verified callable aliases.
 
+> **Custom port?** Export `FI_PORT=8080` (or any free port) before any `./fi` invocation and the gateway, doctor output, wire URLs, and probe all use it. Container-internal port is always 4000; only the host-side mapping changes.
+
 ## Talk to your agent
 
 The skill teaches your agent how to drive the gateway. Examples:
