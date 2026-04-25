@@ -53,6 +53,15 @@ git clone https://github.com/bradAGI/fi-gateway && cd fi-gateway
 ./fi wire hermes            # hermes-agent  → ~/.hermes/config.yaml        (via `hermes config set`)
 ```
 
+**4.** *(Optional)* Make `fi` run from anywhere:
+
+```bash
+./fi install                # symlinks ~/.local/bin/fi → this script
+fi doctor                   # now works from any directory
+```
+
+Detects your shell (bash / zsh / fish — works on macOS and Linux) and prints the right `~/.zshrc` or `~/.bashrc` line if `~/.local/bin` isn't on `$PATH`. `./fi uninstall` removes the symlink.
+
 That's it — your wired agent now routes through `localhost:4000` using your free keys. Every wired tool gets a clean `/v1/models` list of probe-verified callable aliases.
 
 > **Custom port?** Export `FI_PORT=8080` (or any free port) before any `./fi` invocation and the gateway, doctor output, wire URLs, and probe all use it. Container-internal port is always 4000; only the host-side mapping changes.
@@ -109,6 +118,8 @@ client.messages.create(
 ```
 Lifecycle    ./fi start | stop | restart | reload | status | logs [-f]
 Health       ./fi doctor                        proxy + providers + keys + probe age + drift + wired clients
+Globalize    ./fi install [--dir D] [--force]   symlink fi into a $PATH directory
+             ./fi uninstall [--dir D]           remove the symlink
 Keys         ./fi keys add <provider> <key>
              ./fi keys list | remove <provider> [--index N]
 Catalog      ./fi providers                     active vs inactive
