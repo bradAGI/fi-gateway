@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""fi — lightweight CLI for the free-inference gateway.
+"""infer — lightweight CLI for the free-inference gateway.
 
 Single file, stdlib only (Python 3.11+). Drives `docker compose` to run a
 LiteLLM proxy that exposes all your free API keys behind one OpenAI- and
 Anthropic-compatible endpoint.
 
 Usage:
-    ./fi --help
+    ./infer --help
 """
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ def load_catalog(refresh_discovery: bool = False) -> list[dict]:
         if not kind:
             continue
         # Skip discovery for providers without a key — avoids spurious network
-        # calls from commands like `./fi keys add`, and hides models the user
+        # calls from commands like `./infer keys add`, and hides models the user
         # can't actually call.
         if not (grouped.get(prov["key_env"]) or prov.get("optional_key")):
             continue
@@ -594,8 +594,8 @@ def render_config(catalog: list[dict], grouped: dict[str, list[str]],
     Aliases that have been probed and failed (per ~/.config/free-inference/
     .probe-cache.json) are automatically excluded — the router never picks
     them, clients never see them in /v1/models. Unprobed aliases pass
-    through. Pass include_broken=True to emit everything (used by `./fi
-    probe --include-broken` so it can retest previously-failed aliases).
+    through. Pass include_broken=True to emit everything (used by
+    `./infer probe --include-broken` so it can retest previously-failed aliases).
     """
     lines = ["model_list:"]
     probe = load_probe_cache(ignore_ttl=True) or {}
@@ -637,7 +637,7 @@ def render_config(catalog: list[dict], grouped: dict[str, list[str]],
     if skipped_broken:
         # Leave a breadcrumb in the generated file so users understand the
         # trim — purely informational since YAML comments are ignored.
-        lines.insert(0, f"# Excluded {len(skipped_broken)} probe-failed aliases; run `./fi probe` to re-check.")
+        lines.insert(0, f"# Excluded {len(skipped_broken)} probe-failed aliases; run `./infer probe` to re-check.")
 
     lines += [
         "router_settings:",
@@ -719,7 +719,7 @@ def post(path: str, body: dict, headers: dict, timeout: float = 60.0) -> dict:
 def cmd_start(args) -> int:
     active = write_config()
     if not active:
-        err("No providers active — add a key first: ./fi keys add <provider> <key>")
+        err("No providers active — add a key first: ./infer keys add <provider> <key>")
         return 1
     info("Active providers", ", ".join(p["name"] for p in active))
     info("Config", str(CONFIG_YAML))
@@ -728,7 +728,7 @@ def cmd_start(args) -> int:
         return rc
     out("Waiting for proxy…")
     if not wait_alive():
-        err("proxy did not come up in 60s — check `./fi logs`")
+        err("proxy did not come up in 60s — check `./infer logs`")
         return 1
     ok(f"proxy live on {BASE_URL}")
     info("Master key", load_keys().get("LITELLM_MASTER_KEY", ""))
@@ -749,7 +749,7 @@ def cmd_reload(args) -> int:
     if is_alive() or wait_alive():
         ok("proxy reloaded")
         return 0
-    err("proxy did not come back up — check `./fi logs`")
+    err("proxy did not come back up — check `./infer logs`")
     return 1
 
 def cmd_status(args) -> int:
@@ -782,7 +782,7 @@ def _shell_rc() -> tuple[str, str]:
 def cmd_install(args) -> int:
     target_dir = _install_target_dir(args.dir)
     target_dir.mkdir(parents=True, exist_ok=True)
-    src = GATEWAY_DIR / "fi"
+    src = GATEWAY_DIR / "infer"
     name = args.name
     target = target_dir / name
 
@@ -814,7 +814,7 @@ def cmd_install(args) -> int:
         # non-interactive subshells. The robust fix is renaming the symlink.
         out(f"{C.Y}NOTE: `fi` is a reserved word in bash/zsh — bare `fi` calls error.{C.R}")
         out(f"  Recommended: reinstall under a non-reserved name:")
-        out(f"    ./fi install --name figw --force")
+        out(f"    ./infer install --name figw --force")
         out(f"  Or, for interactive shells only: add  alias fi='command fi'  to {rc_file}")
     if on_path and not name_collides:
         out(f"You can now run `{name}` from anywhere.")
@@ -850,7 +850,7 @@ def cmd_doctor(args) -> int:
     alive = is_alive()
     print(f"{C.B}GATEWAY{C.R}")
     print(f"  proxy: {C.G}up at {BASE_URL}{C.R}" if alive
-          else f"  proxy: {C.RD}down{C.R} — run `./fi start`")
+          else f"  proxy: {C.RD}down{C.R} — run `./infer start`")
     master = load_keys().get("LITELLM_MASTER_KEY")
     if master:
         print(f"  master key: {mask(master)}")
@@ -885,7 +885,7 @@ def cmd_doctor(args) -> int:
             mark = f"{C.Y}STALE{C.R}" if stale else f"{C.G}fresh{C.R}"
             print(f"  {kind:<24} {n:>4} models · {age:<14} {mark}")
     else:
-        print("  (no discovery cache yet — run `./fi sync`)")
+        print("  (no discovery cache yet — run `./infer sync`)")
 
     # --- probe cache --------------------------------------------------------
     print(f"\n{C.B}PROBE CACHE{C.R}")
@@ -905,9 +905,9 @@ def cmd_doctor(args) -> int:
         catalog_aliases = {m["alias"] for p in catalog for m in p.get("model", [])}
         ghosts = [a for a in results if a not in catalog_aliases]
         if ghosts:
-            print(f"  {C.Y}drift: {len(ghosts)} probe entries no longer in catalog (run `./fi sync` to prune){C.R}")
+            print(f"  {C.Y}drift: {len(ghosts)} probe entries no longer in catalog (run `./infer sync` to prune){C.R}")
     else:
-        print("  (no probe cache yet — run `./fi probe`)")
+        print("  (no probe cache yet — run `./infer probe`)")
 
     # --- exposed model count ------------------------------------------------
     if alive and master:
@@ -935,7 +935,7 @@ def cmd_doctor(args) -> int:
         if wired:
             print(f"  {C.G}✓{C.R} {name:<10} wired → {t['config']}")
         else:
-            print(f"  {C.D}·{C.R} {name:<10} installed but not wired ({C.B}./fi wire {name}{C.R})")
+            print(f"  {C.D}·{C.R} {name:<10} installed but not wired ({C.B}./infer wire {name}{C.R})")
 
     return 0
 
@@ -947,13 +947,13 @@ def cmd_keys_add(args) -> int:
     p = find_provider(args.provider)
     name = add_key(p["key_env"], args.key)
     ok(f"stored as {name}")
-    out("Run `./fi reload` to pick up the new key.")
+    out("Run `./infer reload` to pick up the new key.")
     return 0
 
 def cmd_keys_list(args) -> int:
     grouped = grouped_keys()
     if not grouped:
-        out("No keys configured. Use `./fi keys add <provider> <key>`.")
+        out("No keys configured. Use `./infer keys add <provider> <key>`.")
         return 0
     raw = load_keys()
     print(f"{'Provider':<18} {'Variable':<28} Value")
@@ -995,7 +995,7 @@ def cmd_models(args) -> int:
     grouped = grouped_keys()
     probe = load_probe_cache() if (args.working or args.broken) else None
     if (args.working or args.broken) and probe is None:
-        err("no probe cache (or stale) — run `./fi probe` first")
+        err("no probe cache (or stale) — run `./infer probe` first")
         return 1
     rows = []
     for p in catalog:
@@ -1021,7 +1021,7 @@ def cmd_models(args) -> int:
 
 def cmd_config_show(args) -> int:
     if not CONFIG_YAML.exists():
-        out("No config yet — run `./fi start` first.")
+        out("No config yet — run `./infer start` first.")
         return 0
     out(CONFIG_YAML.read_text())
     return 0
@@ -1037,7 +1037,7 @@ def cmd_config_path(args) -> int:
 def cmd_test(args) -> int:
     master = load_keys().get("LITELLM_MASTER_KEY")
     if not master:
-        err("master key missing — run `./fi start` first")
+        err("master key missing — run `./infer start` first")
         return 1
     try:
         body = post(
@@ -1068,14 +1068,14 @@ def cmd_sync(args) -> int:
         any_dynamic = True
         has_key = bool(grouped.get(prov["key_env"]) or prov.get("optional_key"))
         if not has_key:
-            print(f"{C.D}∅ {prov['name']}: skipped (no key — `./fi keys add {prov['name']} <key>`){C.R}")
+            print(f"{C.D}∅ {prov['name']}: skipped (no key — `./infer keys add {prov['name']} <key>`){C.R}")
             continue
         ok(f"{prov['name']}: {len(prov.get('model', []))} models cached")
     if not any_dynamic:
         out("No discoverable providers configured.")
     # Prune probe cache: drop entries for aliases no longer in the catalog.
     # Upstream catalogs churn (NVIDIA especially); stale probe entries cause
-    # `./fi models --working` to list models the gateway can't actually route.
+    # `./infer models --working` to list models the gateway can't actually route.
     all_aliases = {m["alias"] for p in catalog for m in p.get("model", [])}
     probe = load_probe_cache(ignore_ttl=True) or {}
     stale = [a for a in probe if a not in all_aliases]
@@ -1171,10 +1171,10 @@ def _probe_one_embed(master: str, alias: str, timeout: int = 20) -> tuple[str, d
 def cmd_probe(args) -> int:
     master = load_keys().get("LITELLM_MASTER_KEY")
     if not master:
-        err("master key missing — run `./fi start` first")
+        err("master key missing — run `./infer start` first")
         return 1
     if not is_alive():
-        err("proxy is down — run `./fi start` first")
+        err("proxy is down — run `./infer start` first")
         return 1
     # --include-broken: regenerate config with probe-failed aliases re-added
     # and force-reload the container so we can actually test them. Without
@@ -1188,7 +1188,7 @@ def cmd_probe(args) -> int:
             err("failed to recreate container")
             return rc
         if not wait_alive():
-            err("proxy did not come back up — check `./fi logs`")
+            err("proxy did not come back up — check `./infer logs`")
             return 1
     catalog = load_catalog()
     grouped = grouped_keys()
@@ -1250,14 +1250,14 @@ def cmd_probe(args) -> int:
     out("")
     ok(f"{okc} working, {C.RD}{failc} broken{C.R} — results cached 24h at {PROBE_CACHE}")
     if args.include_broken:
-        out(f"{C.Y}config currently includes all aliases — run `./fi reload` to re-apply the exclude-broken filter.{C.R}")
-    out(f"Filter to working models: {C.B}./fi models --working{C.R}")
+        out(f"{C.Y}config currently includes all aliases — run `./infer reload` to re-apply the exclude-broken filter.{C.R}")
+    out(f"Filter to working models: {C.B}./infer models --working{C.R}")
     return 0
 
 def cmd_test_anthropic(args) -> int:
     master = load_keys().get("LITELLM_MASTER_KEY")
     if not master:
-        err("master key missing — run `./fi start` first")
+        err("master key missing — run `./infer start` first")
         return 1
     try:
         body = post(
@@ -1526,7 +1526,7 @@ def cmd_wire(args) -> int:
         out(f"{C.D}generated master key (will be used by {args.tool}){C.R}")
     cfg_path = t["config"]
     if _is_wired(t):
-        out(f"{args.tool} is already wired to fi. Run `./fi unwire {args.tool}` to undo.")
+        out(f"{args.tool} is already wired to fi. Run `./infer unwire {args.tool}` to undo.")
         return 0
     if cfg_path.exists():
         backup = _backup_path(cfg_path)
@@ -1546,7 +1546,7 @@ def cmd_wire(args) -> int:
     ok(f"wired {args.tool} — config at {cfg_path}")
     out(f"  - base URL: {FI_OPENAI_URL if args.tool != 'cc' else FI_ANTHROPIC_URL}")
     out(f"  - master key: {mask(master)}")
-    out(f"Start the gateway with `./fi start` (if not already running).")
+    out(f"Start the gateway with `./infer start` (if not already running).")
     return 0
 
 
@@ -1586,7 +1586,7 @@ def cmd_unwire(args) -> int:
 # --- argparse wiring ------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="fi", description="Free-inference gateway CLI")
+    p = argparse.ArgumentParser(prog="infer", description="Free-inference gateway CLI")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("start", help="Generate config and start the proxy").set_defaults(fn=cmd_start)
@@ -1598,12 +1598,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     pi_install = sub.add_parser("install", help="Symlink fi into a directory on $PATH so the command works from anywhere")
     pi_install.add_argument("--dir", default=None, help="Target dir (default: ~/.local/bin)")
-    pi_install.add_argument("--name", default="fi", help="Symlink name (default: fi). Use e.g. --name figw if `fi` collides with bash's reserved word.")
+    pi_install.add_argument("--name", default="infer", help="Symlink name (default: infer)")
     pi_install.add_argument("--force", action="store_true", help="Overwrite an existing entry")
     pi_install.set_defaults(fn=cmd_install)
-    pu_install = sub.add_parser("uninstall", help="Remove the symlink created by `./fi install`")
+    pu_install = sub.add_parser("uninstall", help="Remove the symlink created by `./infer install`")
     pu_install.add_argument("--dir", default=None, help="Target dir (default: ~/.local/bin)")
-    pu_install.add_argument("--name", default="fi", help="Symlink name to remove (default: fi)")
+    pu_install.add_argument("--name", default="infer", help="Symlink name to remove (default: infer)")
     pu_install.set_defaults(fn=cmd_uninstall)
 
     pl = sub.add_parser("logs", help="Tail litellm logs")
@@ -1624,8 +1624,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("sync", help="Refresh dynamically-discovered model lists (e.g. OpenRouter)").set_defaults(fn=cmd_sync)
     pm = sub.add_parser("models", help="List model aliases")
     pm.add_argument("--group", "-g", default=None)
-    pm.add_argument("--working", "-w", action="store_true", help="Only show models that passed `./fi probe`")
-    pm.add_argument("--broken", action="store_true", help="Only show models that failed `./fi probe` (or were never probed)")
+    pm.add_argument("--working", "-w", action="store_true", help="Only show models that passed `./infer probe`")
+    pm.add_argument("--broken", action="store_true", help="Only show models that failed `./infer probe` (or were never probed)")
     pm.set_defaults(fn=cmd_models)
 
     pp = sub.add_parser("probe", help="Smoke-test every alias against the proxy; cache which models work (24h)")
@@ -1635,7 +1635,7 @@ def build_parser() -> argparse.ArgumentParser:
     pp.add_argument("--concurrency", "-c", type=int, default=8, help="Parallel probes (default 8)")
     pp.add_argument("--timeout", "-t", type=int, default=20, help="Per-probe timeout seconds (default 20)")
     pp.add_argument("--include-broken", action="store_true",
-                    help="Temporarily re-render config without the exclude-broken filter so previously-failed aliases can be retested. Run `./fi reload` after to re-apply the filter.")
+                    help="Temporarily re-render config without the exclude-broken filter so previously-failed aliases can be retested. Run `./infer reload` after to re-apply the filter.")
     pp.set_defaults(fn=cmd_probe)
 
     pc = sub.add_parser("config", help="Inspect generated config")

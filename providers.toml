@@ -330,16 +330,10 @@ groups = ["code"]
 
 # ---
 
-[[provider]]
-name = "pollinations"
-key_env = "POLLINATIONS_API_KEY"  # optional — works without key
-base_url = "https://gen.pollinations.ai"
-litellm_prefix = "openai"
-optional_key = true  # provider works even when key is absent
-discovery = "pollinations"
-# Models auto-discovered from gen.pollinations.ai/v1/models, filtered to
-# those advertising /v1/chat/completions. Pollinations is keyless —
-# discovery runs as soon as the provider appears in the catalog.
+# Pollinations removed — they started returning HTTP 403 to our requests
+# (likely user-agent / IP filtering). Re-add manually if their endpoint
+# stabilizes; the discovery handler is still in `infer` under the
+# `pollinations` kind.
 
 # ---
 
