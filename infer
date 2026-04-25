@@ -1344,6 +1344,37 @@ def _wire_pi_unpatch(cfg: dict) -> dict:
     return cfg
 
 
+_OPENCODE_AUTH = Path.home() / ".local" / "share" / "opencode" / "auth.json"
+
+
+def _opencode_auth_set(master: str) -> None:
+    """Custom providers in opencode require an entry in auth.json or they
+    show in /models but fail at request time. Add ours, preserving any
+    other entries the user has."""
+    _OPENCODE_AUTH.parent.mkdir(parents=True, exist_ok=True)
+    auth: dict = {}
+    if _OPENCODE_AUTH.exists():
+        try:
+            auth = json.loads(_OPENCODE_AUTH.read_text())
+        except json.JSONDecodeError:
+            auth = {}
+    auth[INFER_PROVIDER_ID] = {"type": "api", "key": master}
+    _OPENCODE_AUTH.write_text(json.dumps(auth, indent=2) + "\n")
+
+
+def _opencode_auth_clear() -> None:
+    if not _OPENCODE_AUTH.exists():
+        return
+    try:
+        auth = json.loads(_OPENCODE_AUTH.read_text())
+    except json.JSONDecodeError:
+        return
+    if INFER_PROVIDER_ID not in auth:
+        return
+    del auth[INFER_PROVIDER_ID]
+    _OPENCODE_AUTH.write_text(json.dumps(auth, indent=2) + "\n")
+
+
 def _wire_opencode_check(cfg: dict) -> bool:
     return INFER_PROVIDER_ID in (cfg.get("provider") or {})
 
@@ -1356,11 +1387,13 @@ def _wire_opencode_patch(cfg: dict, master: str) -> dict:
         "options": {"baseURL": INFER_OPENAI_URL, "apiKey": master},
         "models": {mid: {"name": f"infer/{mid}"} for mid in FI_WIRE_MODELS},
     }
+    _opencode_auth_set(master)
     return cfg
 
 def _wire_opencode_unpatch(cfg: dict) -> dict:
     providers = cfg.get("provider") or {}
     providers.pop(INFER_PROVIDER_ID, None)
+    _opencode_auth_clear()
     return cfg
 
 
@@ -1567,6 +1600,10 @@ def cmd_unwire(args) -> int:
     if backup.exists():
         cfg_path.write_text(backup.read_text())
         backup.unlink()
+        # opencode's auth.json lives in a separate file from opencode.json,
+        # so the backup-restore alone doesn't clean up the auth entry.
+        if args.tool == "opencode":
+            _opencode_auth_clear()
         ok(f"restored {cfg_path} from backup, removed {backup}")
         return 0
     if not cfg_path.exists():
