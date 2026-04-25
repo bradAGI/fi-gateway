@@ -2,82 +2,103 @@
   <img src="banner.png" alt="fi — free-inference gateway" width="100%">
 </p>
 
-<h1 align="center">fi</h1>
+<h1 align="center">fi-gateway</h1>
 
 <p align="center">
-  <strong>A Claude Code skill</strong> that gives your agent access to 300+ free LLM models<br>
-  behind one endpoint that speaks OpenAI <em>and</em> Anthropic shapes.
+  <strong>Wire your coding agent to 300+ free LLMs.</strong><br>
+  One endpoint. OpenAI <em>and</em> Anthropic shapes. Claude Code, opencode, pi-mono — all three auto-configured.
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/install-npx%20skills-informational" alt="npx skills">
-  <img src="https://img.shields.io/badge/deps-stdlib%20only-brightgreen" alt="stdlib only">
+  <img src="https://img.shields.io/badge/python-3.11%2B-informational" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/docker-required-blue" alt="Docker required">
 </p>
 
 ---
 
-## Install
+## 1. Install
 
 ```bash
 npx skills add bradagi/fi-gateway
 ```
 
-That's it. The skill installs into your agent's skills directory (`~/.claude/skills/fi-gateway/` for Claude Code, equivalent paths for [41+ other agents](https://github.com/vercel-labs/skills)) — `SKILL.md`, the CLI, provider catalog, and Docker compose file all arrive together.
+The skill installs into your agent's skills directory (`~/.claude/skills/fi-gateway/` for Claude Code, equivalent paths for [41+ other agents](https://github.com/vercel-labs/skills)) — `SKILL.md`, the CLI, provider catalog, and Docker compose file all arrive together.
 
-## Use it
+## 2. Wire your coding agent
 
-Talk to your agent the way you'd talk to a teammate. The skill wires up the common workflows:
+`fi-gateway` ships bindings for the three coding agent CLIs most people have installed. One command per tool:
+
+```bash
+./fi detect              # scans: Claude Code, opencode, pi-mono — installed? already wired?
+./fi wire cc             # Claude Code → ~/.claude/settings.json  (ANTHROPIC_BASE_URL + key)
+./fi wire opencode       # opencode    → ~/.config/opencode/opencode.json  (adds fi provider)
+./fi wire pi             # pi-mono     → ~/.pi/agent/models.json           (adds fi provider)
+./fi unwire <tool>       # restore from .fi-backup
+```
+
+Each `wire` saves the original config to `<path>.fi-backup` before editing, so `./fi unwire` is always safe. For `cc`, the settings file is chmod'd to 600 since it now contains the gateway's master key.
+
+After wiring, your coding agent's normal commands route through the fi gateway at `localhost:4000` instead of the vendor's API — so every request uses *your* free keys (Gemini, NVIDIA, OpenRouter, HF, …) with rate-limit-aware fallbacks.
+
+## 3. Add your free keys and start it
+
+```bash
+./fi keys add gemini AIza...
+./fi keys add nvidia nvapi-...
+./fi keys add openrouter sk-or-...
+
+./fi start               # boots the proxy at http://localhost:4000 and prints the master key
+```
+
+Now your wired coding agents talk to the gateway. `./fi start` prints a `sk-fi-…` master key — that's what the wired tools use, not your raw provider keys.
+
+## Or just talk to your agent
+
+The skill teaches your agent how to drive the gateway end-to-end:
 
 ```
-you> add my gemini key AIza...
+you> add my gemini key AIza…
 claude> [stores as GEMINI_API_KEY_1, runs ./fi reload]
+
+you> wire me up for claude code
+claude> [runs ./fi wire cc — sets ANTHROPIC_BASE_URL in settings.json, backs up original]
 
 you> what free models do I have?
 claude> [runs ./fi models — shows your 300+ aliases across providers]
 
-you> spin up the proxy
-claude> [runs ./fi start — proxy live at http://localhost:4000, prints master key]
-
-you> smoke test a reasoning model
-claude> [picks an under-quota reasoning model, runs ./fi test]
-
-you> add NVIDIA too — nvapi-...
-claude> [stores the key, runs ./fi sync, discovers 135 NVIDIA models, ./fi reload]
+you> add nvidia too — nvapi-…
+claude> [stores key, runs ./fi sync, discovers 135 NVIDIA models, ./fi reload]
 
 you> why is the smart group 404'ing?
 claude> [checks ./fi logs, diagnoses upstream access issue]
 ```
 
-Under the hood, the skill drives a single-file Python CLI (`fi`) that runs a LiteLLM proxy in Docker. The skill is the *voice* — the CLI is the *mechanism*.
-
 ## What you get
 
 - **One endpoint, two shapes** — `/v1/chat/completions` (OpenAI) *and* `/v1/messages` (Anthropic) from the same master key.
-- **300+ models out of the box** — Gemini, Groq, OpenRouter, NVIDIA NIM, Hugging Face, Cerebras, Mistral, Scaleway, Voyage, Jina, Pollinations, and more.
-- **Auto-discovery** — OpenRouter, NVIDIA, Hugging Face, Pollinations catalogs refresh from live APIs; no static lists to maintain.
-- **Rate-limit-aware routing** — respects each provider's RPM/TPM, cools down on 429s, rotates across multiple keys per provider.
-- **Group aliases** — `fast`, `smart`, `vision`, `embed`, `rerank`, `code`, `reasoning` pick the cheapest under-quota deployment and fall back on 429/5xx.
+- **300+ models out of the box** — Gemini, Groq, OpenRouter, NVIDIA NIM, Hugging Face, Cerebras, Mistral, Scaleway, Voyage, Jina, Pollinations, Cohere, Together, Hunyuan, Chutes, LLM7, Ollama Cloud.
+- **Auto-discovery** — OpenRouter, NVIDIA NIM, Hugging Face, Pollinations catalogs refresh from live APIs (24h cache); no static lists to maintain.
+- **Rate-limit-aware routing** — respects each provider's RPM/TPM, cools down on 429s, round-robins across multiple keys per provider.
+- **Group aliases** — `fast`, `smart`, `vision`, `embed`, `rerank`, `code`, `reasoning` pick the cheapest under-quota deployment and fail over on 429/5xx.
 
 ## Requirements
-
-The skill runs commands on your machine, so you need:
 
 - Python 3.11+ (stdlib only — no pip install)
 - `docker` + `docker compose` plugin
 - Linux, macOS, or WSL2
 
-## Using clients directly
+## Using the endpoint directly
 
-Once `./fi start` is running (your agent can do that for you), any OpenAI or Anthropic SDK points at one URL:
+Once `./fi start` is running, any OpenAI or Anthropic SDK points at the same URL:
 
 ```python
 # OpenAI SDK
 from openai import OpenAI
 client = OpenAI(base_url="http://localhost:4000/v1", api_key="sk-fi-…")
 client.chat.completions.create(
-    model="fast",                    # or "gemini-2.5-flash", "smart", "code", "embed", …
+    model="fast",                  # or "gemini-2.5-flash", "smart", "code", "embed", …
     messages=[{"role": "user", "content": "Hello"}],
 )
 
@@ -91,77 +112,53 @@ client.messages.create(
 )
 ```
 
-## Without the skill — direct CLI
+LiteLLM handles the translation under the hood — so the Anthropic SDK works against every model in your catalog, not just real Anthropic.
 
-If you want to drive it yourself instead of through your agent, the CLI lives at the repo root:
+## CLI reference
 
-```bash
-git clone https://github.com/bradAGI/fi-gateway
-cd fi-gateway
-
-./fi keys add gemini AIza...
-./fi start
-./fi test fast
-```
-
-Full command list:
+All commands run from the repo root (or `~/.claude/skills/fi-gateway/` if installed via `npx skills add`):
 
 ```
-./fi start           Generate config and boot the proxy
-./fi stop            docker compose down
-./fi reload          Regenerate config + force-recreate container
-./fi restart         Bounce without regenerating
-./fi status          Health + active providers
-./fi logs [-f]       Tail litellm logs
+# Proxy lifecycle
+./fi start / stop / restart / reload / status / logs [-f]
 
-./fi keys add <p> <key>
+# Keys
+./fi keys add <provider> <key>
 ./fi keys list
-./fi keys remove <p> [--index N]
+./fi keys remove <provider> [--index N]
 
-./fi providers       Active vs inactive
-./fi models [-g G]   Filter by group
-./fi sync            Force-refresh auto-discovered catalogs
-./fi config show     Print generated config.yaml
-./fi config path     Runtime file paths
+# Catalog inspection
+./fi providers                   Active vs inactive providers
+./fi models [-g GROUP]           Filter aliases by group
+./fi sync                        Force-refresh auto-discovered catalogs
+./fi config show / path
 
-./fi test <model> [--prompt P]             OpenAI shape
-./fi test-anthropic <model> [--prompt P]   Anthropic shape
+# Smoke tests
+./fi test <alias> [--prompt P]           OpenAI shape
+./fi test-anthropic <alias> [--prompt P] Anthropic shape
 
-./fi detect                                Scan installed client CLIs (pi, opencode, cc)
-./fi wire <tool>                           Edit client config to point at fi; saves .fi-backup
-./fi unwire <tool>                         Restore the client config from .fi-backup
+# Wire coding agent CLIs
+./fi detect                      Status for pi / opencode / cc
+./fi wire <tool>                 cc | opencode | pi — edits config, saves .fi-backup
+./fi unwire <tool>               Restore from the .fi-backup
 ```
 
-## Wire your CLI tools
-
-`fi` ships bindings for three coding agent CLIs so they can route through the gateway and hit your free keys:
-
-```bash
-./fi detect              # pi / opencode / cc — installed? already wired?
-./fi wire cc             # Claude Code → ~/.claude/settings.json (ANTHROPIC_BASE_URL + key)
-./fi wire opencode       # opencode   → ~/.config/opencode/opencode.json (adds fi provider)
-./fi wire pi             # pi-mono    → ~/.pi/agent/models.json (adds fi provider)
-./fi unwire cc           # restore from ~/.claude/settings.json.fi-backup
-```
-
-Each `wire` saves the original config to `<path>.fi-backup` before editing. `unwire` restores from that backup. Wiring is safe to run before `./fi start` — the edits take effect when the proxy is actually running at localhost:4000. For `cc` the settings file is chmod'd to 600 since it now contains the master key.
-
-## How it's laid out
+## Repo layout
 
 ```
-fi-gateway/              # skill root — same as repo root
-├── SKILL.md             # what your agent reads to learn how to drive fi
+fi-gateway/              # skill root == repo root
+├── SKILL.md             # instructions your agent reads to drive fi
 ├── fi                   # single-file Python CLI (stdlib only)
 ├── providers.toml       # catalog — 20 providers, 4 with auto-discovery
 ├── docker-compose.yml   # one service: LiteLLM proxy
-├── README.md            # this file
+├── banner.png
 ├── LICENSE
-└── banner.png
+└── README.md
 ```
 
-User data lives in `~/.config/free-inference/`:
+User data lives in `~/.config/free-inference/` (never synced to the skill repo):
 
-- `keys.env` — chmod 600, gitignored, never synced to the skill repo
+- `keys.env` — chmod 600, gitignored
 - `config.yaml` — regenerated every `./fi start` / `./fi reload`
 - `.discovery-cache.json` — 24h cache of auto-discovered model lists
 
@@ -174,7 +171,7 @@ User data lives in `~/.config/free-inference/`:
 | `huggingface_inference` | `router.huggingface.co/v1/models` (live providers, $0.10/mo free credits) | 24h |
 | `pollinations` | `gen.pollinations.ai/v1/models` (keyless) | 24h |
 
-Discovery is skipped for providers without a configured key (except `optional_key` providers like Pollinations). Agents can run `./fi sync` to force a refresh.
+Discovery is skipped for providers without a configured key (except `optional_key` providers like Pollinations). Run `./fi sync` to force a refresh.
 
 ## Adding a provider
 
@@ -185,7 +182,7 @@ Append one TOML block, then `./fi reload`:
 name = "your-provider"
 key_env = "YOURPROVIDER_API_KEY"
 base_url = "https://api.yours.example/v1"
-litellm_prefix = "openai"           # or "gemini", "cohere", "nvidia_nim", …
+litellm_prefix = "openai"              # or "gemini", "cohere", "nvidia_nim", …
 
 [[provider.model]]
 alias = "yours-flagship"
@@ -198,6 +195,7 @@ No code change needed — the catalog is data.
 
 ## Caveats
 
+- **Wiring locks your tool to the gateway's liveness** — if you `./fi wire cc` then kill the proxy, Claude Code will fail until you restart it. `./fi unwire cc` anytime to revert.
 - `/v1/messages` drops `cache_control` blocks for non-Anthropic upstreams (free providers don't have prompt caching).
 - Streaming event order for tool-call edge cases may differ subtly from native Anthropic; standard streaming works fine.
 - Some providers need a specific `litellm_prefix` for Anthropic-shape translation — `openai` routes `/v1/messages` through OpenAI's Responses API which most providers don't expose. Use the dedicated prefix (`nvidia_nim`, `cohere`, `gemini`) when available.
