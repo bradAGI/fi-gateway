@@ -134,6 +134,7 @@ def _run_discovery(kind: str, refresh: bool = False) -> list[dict]:
         "huggingface_inference": _fetch_huggingface_models,
         "pollinations": _fetch_pollinations_models,
         "gemini": _fetch_gemini_models,
+        "opencode_zen_free": _fetch_opencode_zen_models,
     }
     handler = handlers.get(kind)
     if not handler:
@@ -480,6 +481,56 @@ def _fetch_openrouter_free_models(refresh: bool = False) -> list[dict]:
         })
     _save_discovery_cache("openrouter_free", free)
     return free
+
+# OpenCode Zen marks free models with a `-free` suffix on the id; stealth
+# preview models (currently `big-pickle`) are also given out free during
+# their preview window. We surface only those — paid Claude/GPT/Gemini ids
+# returned by the same /v1/models endpoint would silently bill Zen credits.
+_OPENCODE_ZEN_STEALTH_FREE = {"big-pickle"}
+
+def _fetch_opencode_zen_models(refresh: bool = False) -> list[dict]:
+    if not refresh:
+        cached = _load_discovery_cache("opencode_zen_free")
+        if cached is not None:
+            return cached
+    keys_for = grouped_keys().get("OPENCODE_ZEN_API_KEY", [])
+    if not keys_for:
+        return []
+    print(f"{C.D}discovering opencode zen free models…{C.R}", file=sys.stderr)
+    try:
+        # opencode.ai 403s the default Python-urllib UA; any non-default works.
+        req = urllib.request.Request(
+            "https://opencode.ai/zen/v1/models",
+            headers={"User-Agent": "infer/0.1"},
+        )
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = json.loads(r.read())
+    except Exception as e:
+        err(f"opencode zen discovery failed: {e}")
+        return _load_discovery_cache("opencode_zen_free", ignore_ttl=True) or []
+    out: list[dict] = []
+    for m in data.get("data", []):
+        mid = m.get("id") or ""
+        if not mid:
+            continue
+        if not (mid.endswith("-free") or mid in _OPENCODE_ZEN_STEALTH_FREE):
+            continue
+        cls = _classify_alias(mid)
+        if cls == "drop":
+            continue
+        groups = ["opencode_zen", "free"]
+        if cls == "embed" and "embed" not in groups:
+            groups.append("embed")
+        if cls == "rerank" and "rerank" not in groups:
+            groups.append("rerank")
+        out.append({
+            "alias": mid,
+            "upstream": mid,
+            "groups": groups,
+        })
+    _save_discovery_cache("opencode_zen_free", out)
+    return out
+
 
 def _is_free_pricing(pricing: dict) -> bool:
     def zero(v) -> bool:

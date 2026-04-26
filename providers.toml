@@ -362,6 +362,18 @@ groups = ["vision"]
 # ---
 
 [[provider]]
+name = "opencode-zen"
+key_env = "OPENCODE_ZEN_API_KEY"
+base_url = "https://opencode.ai/zen/v1"
+litellm_prefix = "openai"
+discovery = "opencode_zen_free"
+# Filters opencode.ai/zen/v1/models down to the free tier (ids ending in
+# `-free`, plus the `big-pickle` stealth preview model). Get a key via
+# `/connect` in the OpenCode TUI.
+
+# ---
+
+[[provider]]
 name = "ollama-cloud"
 key_env = "OLLAMA_CLOUD_API_KEY"
 base_url = "https://ollama.com/v1"

@@ -157,6 +157,7 @@ Each run writes `~/.config/infer/.probe-cache.json` with status, latency, and er
 | `openrouter_free` | `openrouter.ai/api/v1/models` filtered to `pricing.prompt == 0` | 24h |
 | `nvidia_nim` | `integrate.api.nvidia.com/v1/models` | 24h |
 | `gemini` | `generativelanguage.googleapis.com/v1beta/openai/models` | 24h |
+| `opencode_zen_free` | `opencode.ai/zen/v1/models` filtered to `-free` suffix + stealth list | 24h |
 
 Each handler classifies discovered ids into `chat / embed / rerank / drop`. Image / video / audio / TTS / document-parser / deprecated endpoints are dropped at discovery — they never enter the catalog. Embedding models stay in catalog with the `embed` tag and are probed via `/v1/embeddings`.
 
